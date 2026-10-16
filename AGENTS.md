@@ -30,7 +30,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-15）：ruff 乾淨、226 passed（約 25 秒）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、278 passed（約 25 秒）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -45,10 +45,10 @@ videomaker/
   __main__.py   argparse CLI 入口；所有子指令在此分派（--format 的 choices 是寫死的）
   config.py     環境變數 → 常數（ROOT、COMFY_URL、LLM_URL、LLM_MODEL、WORK、MIN_FREE_GB、STEPS、COOL_TEMP、DEFAULT_BPM）
   plan.py       Plan／Shot／Music（pydantic）、企劃內容規則（regex）、FORMATS、shot_math、build_layout、make_plan（呼叫 LLM，驗證失敗最多重寫 3 次）
-  pipeline.py   Job、new_job、各階段 music／keyframes／clips／mux／qc、照片模式（_use_photos）、run、bench
+  pipeline.py   Job、new_job、各階段 music／keyframes／clips／mux／qc、slot_windows（mux 與視覺 QC 共用的取用區段）、照片模式（_use_photos）、run、bench
   comfy.py      ComfyUI client（/prompt→輪詢 /history→/view）、fill()（依 workflow_map.yaml 填值）、記憶體檢查、models_in()、missing_models()
   audio.py      librosa 拍點偵測、切點、frame_bounds
-  visual_qc.py  clef-flash 視覺抽樣（2fps）；逐張原子保存、素材與模型 digest 失效檢查、合輯結果彙整
+  visual_qc.py  clef-flash 視覺抽樣（2fps，只查成片實際用到的區段）；逐張原子保存、素材／區段／模型 digest 失效檢查、合輯結果彙整
   nightly.py    夜間排程：LLM 想主題、預估耗時 vs deadline、GPU 降溫等待、失敗重試一次、寫 history.jsonl
   weekly.py     週五合併：用 ffmpeg -c copy 把週一到四的同片型串成一支
   youtube.py    OAuth、可續傳上傳（冪等）、核准閘門、listing、token 健康檢查與 renew_token
@@ -94,6 +94,13 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 照片模式加的負向提示詞 `PHOTO_NEG` **含簡體字是刻意的**（Wan 官方負向提示詞就是簡體中文，workflow 裡的預設 `neg` 也是），不要被簡繁檢查「修正」——`SIMPLIFIED` 只套用在 YouTube 欄位與夜間主題。正向用 `only the dogs are in the scene` 而不寫否定句（Wan 對 "no hands" 反而容易畫出手）。
 - 關鍵幀有黑邊（`_has_black_bars`）會換 seed 重生最多 3 次，3 次後**不會報錯**而是沿用最後一張。
 
+**視覺 QC（visual_qc.py）**
+- 查的是 `mux` 實際放進成片的區段，不是整支原始鏡頭：區段由 `pipeline.slot_windows` 算（`mux` 同一份），改取用邏輯時兩邊會一起動，不要在 `visual_qc` 另寫一份。結果的 `time` 是素材內秒數、`final_time` 是成片時間。
+- fingerprint 含素材 hash、取用區段、問題、模型 digest、抽樣設定；**不含 `THRESHOLD`**（只影響判定）。調門檻只依已存分數重算狀態，不重跑 GPU。
+- `check()` 取得本次 fingerprint 之前失敗（Ollama 離線等），要保留磁碟上既有結果、只標 `error`；`except` 是 `Exception`（刻意，否則檔案會永遠停在 `running`）。
+- `combine()`（週五合輯）fail-closed：只有全部來源明確 `passed` 且門檻、抽樣率與現行相同才算通過。
+- 基本 QC（解析度、長度、音軌、響度、黑畫面）失敗時不跑視覺檢查；`meta.json` 的 `models.visual_qc` 只在確實有畫面送進模型時才寫，附 digest。
+
 **CLI 與遠端介面**
 - **部分子指令的 stdout 是機器介面**：`jobs-json`（TUI 用 `json.loads`）、`token-status`（`remote_status` 取最後一行 `ok／expired／missing`）、`upload`（印影片 ID）。這些指令不要多印東西；人看的訊息走 `logging`（stderr）。
 - `tui` 是**延遲載入**（`__main__` 內 `from .tui import run`），因為 GX10 沒裝 Textual，夜間 cron 不能因此壞掉。其他頂層 import 也不要引入 GX10 沒有的套件。
@@ -125,7 +132,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 程式碼的關鍵邏輯註解與文件用**繁體中文（台灣用語）**，沿用現有風格；技術名詞與識別字維持英文。
 - 改完程式要跑 ruff + pytest，宣告完成前**貼出實際輸出**；跳過任何步驟要明說。
 - **commit 前先讓使用者確認內容**。格式 `<type>: <description>`（feat／fix／refactor／docs／test／chore／perf／ci）；不加 `Co-Authored-By` 等 attribution 行。
-- 專案目前**還沒有任何 commit**（2026-10-15）。`photo/`（私人照片）與 `.DS_Store` 已在 `.gitignore`，不要 `git add -f`。
+- 專案已有初始 commit（2026-10-16，35 個檔案一次收進）。`photo/`（私人照片）與 `.DS_Store` 已在 `.gitignore`，不要 `git add -f`。
 
 ## 已知問題與待辦
 
