@@ -289,7 +289,7 @@ videoMaker make "肉丸和Sunny跳舞" --images photos/meatball photos/sunny
 ```
 LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消歧義頁、太短的直接略過）
   → LLM 只能依抓到的條目寫 facts：每則 = 一句英文字幕 text + 條目原文的片段 quote
-  → 程式驗證：quote 逐字出現在條目裡（≥ 30 字元）、字幕裡的數字也出現在 quote 裡、字幕純英文且 ≤ 110 字元、不重複；不過就把錯誤丟回 LLM 重寫（最多 3 次）
+  → 程式驗證：quote 逐字出現在條目裡（≥ 30 字元）、字幕裡的數字也出現在 quote 裡、字幕裡 4 字母以上的實詞（扣掉虛詞、條目標題的字，容許詞形變化）也都出現在 quote 裡、字幕純英文且 ≤ 110 字元、不重複；不過就把錯誤（含被擋的詞）丟回 LLM 重寫（最多 3 次）
   → 來源由程式寫入 plan.sources 與 YouTube 說明欄（固定版本的永久連結 + CC BY-SA 4.0），不採用 LLM 填的網址
 ```
 
@@ -299,11 +299,11 @@ LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消
 - **片型**：只有 short、long（沒有 xl，也不支援照片模式）。
 - **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱）；先用 `--dry-run` 看企劃。
 - **`meta.json` 與 `plan.json`**：`meta.wikipedia` 記條目標題、永久連結、授權；`plan.kind = "trivia"`、`plan.facts`（字幕與 quote）、`plan.sources`。
-- **限制（人工看片不可省）**：quote 驗證只保證「LLM 引用的原文真的存在」，不保證字幕對原文的改寫完全正確（例如把範圍寫成單一數字、省略但書）；字幕與條目對照仍要人工把關。維基條目會被編輯，永久連結固定在抓取當時的版本。
+- **限制（人工看片不可省）**：quote 驗證保證「引用的原文存在」，詞彙比對擋下「字幕寫了 quote 沒說的事」（實測抓到過 `eat sea urchins`）；但它是啟發式，抓不到把範圍寫成單一數字、省略但書這類改寫，同義詞改寫也會被擋（所以 LLM 必須沿用 quote 的用詞）。中文標題與說明欄只檢查有沒有用維基的中文名稱，內容沒有驗證。字幕與條目仍要人工對照。維基條目會被編輯，永久連結固定在抓取當時的版本。
 
 ## 夜間排程
 
-GX10 的 crontab（**新排程：程式已改好，部署到 GX10 前仍是舊的單行 `1-4`**；安裝後以 `ssh gx10 crontab -l` 為準）：
+GX10 的 crontab（2026-10-16 起已安裝新排程；舊的單行 `1-4` 備份在 GX10 的 `~/crontab.backup-20261016`；實際以 `ssh gx10 crontab -l` 為準）：
 
 ```
 30 19 * * 1,3 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly --kind kids >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1

@@ -1792,7 +1792,7 @@ def _facts(n=2):
         "They use rocks as tools to crack open shellfish",
     ]
     texts = [
-        "Sea otters have the thickest fur of any animal.",
+        "Sea otters have the densest fur of any animal.",
         "Sea otters use rocks as tools to open shellfish.",
     ]
     return [
@@ -1849,6 +1849,8 @@ def test_check_facts_requires_verbatim_quotes_from_the_article():
         "too long": ([good[0], Fact(text="Sea otters " * 20, quote=good[1].quote)], "字元"),
         "number not in quote": ([good[0], Fact(text="Sea otters have 99999 hairs on their fur.", quote=good[1].quote)], "數字"),
         "duplicate": ([good[0], good[0]], "重複"),
+        "claim beyond quote": ([good[0], Fact(text="Sea otters use rocks as tools and eat sea urchins.", quote=good[1].quote)], "urchins"),
+        "synonym not in quote": ([good[0], Fact(text="Sea otters use rocks as tools to smash shellfish.", quote=good[1].quote)], "smash"),
     }  # fmt: skip
     for facts, message in bad.values():
         with pytest.raises(ValueError, match=message):
@@ -2063,3 +2065,17 @@ def test_trivia_make_plan_forces_the_wikipedia_chinese_name(monkeypatch):
     yt = planmod.Youtube(title="長頸鹿｜Giraffe", description="x", tags=[])
     planmod.check_zh_name(yt, "长颈鹿")
     planmod.check_zh_name(yt, "")
+
+
+def test_check_facts_word_support_allows_inflection_title_and_short_words():
+    from videomaker.plan import Fact, check_facts
+
+    article = _article()
+    quote = "They use rocks as tools to crack open shellfish"
+    # 詞形變化（rocks／rock 前 5 字母相同）、條目標題的字（Sea otter）、4 字母以下的字與虛詞都不算數
+    ok = Fact(text="A sea otter is using a rock as a tool to open shellfish, and it is fun.", quote=quote)
+    check_facts([ok, Fact(**_facts()[0])], article, 2)
+    glue = Fact(
+        text="Sea otters use rocks as tools, which they use to open shellfish.", quote=quote
+    )  # which 是虛詞，不比對
+    check_facts([glue, Fact(**_facts()[0])], article, 2)

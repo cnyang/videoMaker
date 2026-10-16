@@ -225,6 +225,82 @@ KINDS = {"kids": list(FORMATS), "trivia": list(FACTS_PER)}  # 每種內容有哪
 FACT_MAX = 110  # 字幕最長字元數：1080 寬直式畫面一行約 26 字元，超過 5 行會蓋住畫面
 
 
+# 字幕與 quote 的詞彙比對時不算數的虛詞（4 字母以上的常見功能詞）；4 字母以下的字一律不比對
+_STOP = frozenset(
+    {
+        "that",
+        "with",
+        "have",
+        "from",
+        "into",
+        "over",
+        "their",
+        "there",
+        "they",
+        "them",
+        "this",
+        "these",
+        "those",
+        "some",
+        "many",
+        "most",
+        "very",
+        "also",
+        "than",
+        "then",
+        "when",
+        "what",
+        "which",
+        "only",
+        "each",
+        "other",
+        "about",
+        "like",
+        "often",
+        "even",
+        "much",
+        "more",
+        "just",
+        "been",
+        "were",
+        "will",
+        "would",
+        "could",
+        "should",
+        "every",
+        "because",
+        "while",
+        "where",
+        "after",
+        "before",
+        "under",
+        "between",
+        "called",
+        "known",
+    }
+)
+
+
+def _stem(word: str) -> str:
+    """粗略去掉詞尾（using→us、use→us、rocks→rock），只用來比對詞形變化，不求語言學正確。"""
+    for suffix in ("ing", "ed", "es", "s", "e"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 2:
+            return word[: -len(suffix)]
+    return word
+
+
+def unsupported_words(text: str, quote: str, title: str) -> list[str]:
+    """字幕裡 quote 沒有支持的實詞：4 字母以上、非虛詞，且詞形（去詞尾或前 5 個字母）沒出現在 quote 或條目標題裡。
+    啟發式：字幕只能寫 quote 說的事；同義詞改寫也會被擋，所以要求 LLM 沿用 quote 的用詞。"""
+    support = re.findall(r"[a-z]+", f"{quote} {title}".lower())
+    stems, heads = {_stem(t) for t in support}, {t[:5] for t in support}
+    return [
+        w
+        for w in dict.fromkeys(re.findall(r"[a-z]+", text.lower()))
+        if len(w) >= 4 and w not in _STOP and _stem(w) not in stems and w[:5] not in heads
+    ]
+
+
 def check_facts(facts: list[Fact], article: Article, n: int) -> None:
     """小知識必須有來源：每則附維基條目的原文片段，程式驗證它真的出現在抓到的條目裡；字幕裡的數字也必須出現在片段裡。"""
     if len(facts) != n:
@@ -242,6 +318,10 @@ def check_facts(facts: list[Fact], article: Article, n: int) -> None:
             raise ValueError(f"fact {i}.quote 必須逐字複製自條目原文（至少 30 字元），但在條目裡找不到")
         if extra := set(re.findall(r"\d+", f.text)) - set(re.findall(r"\d+", quote)):
             raise ValueError(f"fact {i}.text 的數字 {sorted(extra)} 沒有出現在它的 quote 裡")
+        if missing := unsupported_words(f.text, quote, article.title):
+            raise ValueError(
+                f"fact {i}.text 的詞 {missing} 沒有出現在它的 quote 裡；字幕只能寫 quote 支持的內容，請沿用 quote 的用詞，或換一段能支持它的 quote"
+            )
     if len({f.text.lower() for f in facts}) != n:
         raise ValueError("facts 不可重複")
 
@@ -313,6 +393,7 @@ THIS PLAN IS A KIDS TRIVIA VIDEO built from a Wikipedia article given by the use
 Use ONLY what the article says; never add facts from memory. Each fact: "text" = ONE simple, true, child-friendly English sentence for ages 3-8
 (20-110 characters, pure ASCII, nothing scary, no death, disease, violence or danger); "quote" = a sentence or phrase of at least 30 characters
 copied VERBATIM from the article text that supports the fact (the program checks it appears in the article); every number in "text" must also appear in its "quote".
+The "text" may only say what its "quote" says: every word of 4+ letters in "text" must also appear in its "quote" (inflections are fine), except the subject's own name; never add details from elsewhere in the article or from memory.
 Facts must be different from each other. The captions are drawn by the program, so shot prompts still must not mention text.
 character: the subject of the article drawn as a friendly cartoon (an animal, or a smiling cartoon object/planet with big friendly eyes); shots show it in varied simple scenes.
 youtube.title English part like "Sea Otter Facts for Kids"; hashtags like #KidsFacts #FunFacts #Learning instead of #KidsMusic; tags include "fun facts for kids", "kids learning"."""
