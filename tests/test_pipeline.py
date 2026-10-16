@@ -2079,3 +2079,25 @@ def test_check_facts_word_support_allows_inflection_title_and_short_words():
         text="Sea otters use rocks as tools, which they use to open shellfish.", quote=quote
     )  # which 是虛詞，不比對
     check_facts([glue, Fact(**_facts()[0])], article, 2)
+
+
+def test_visual_threshold_is_20_percent(visual_env):
+    assert visual_qc.THRESHOLD == 0.2  # 實測 38% 的畫面（身體融合）明顯有缺陷，50% 會放行
+    env = visual_env
+    env.scores = [0.19]
+    assert visual_qc.check(env.job)["status"] == "passed"
+    env.scores = [0.22]
+    env.job.p("clips/01.mp4").write_bytes(b"another clip")  # 換素材才會重查
+    assert visual_qc.check(env.job)["status"] == "flagged"
+
+
+def test_restate_recomputes_finished_results_only():
+    scores = {"visual_defect": {"score": 0.3, "source": "clips/01.mp4", "time": 0}}
+    old = {"status": "passed", "threshold": 0.5, "scores": scores}
+    new = visual_qc.restate(old)
+    assert (
+        new["status"] == "flagged" and new["threshold"] == visual_qc.THRESHOLD and old["status"] == "passed"
+    )
+    assert visual_qc.restate({**old, "status": "flagged", "scores": {}})["status"] == "passed"
+    for state in ("error", "running", "not_checked"):
+        assert visual_qc.restate({"status": state, "scores": scores}) == {"status": state, "scores": scores}

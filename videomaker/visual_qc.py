@@ -24,7 +24,7 @@ FPS = 2
 SCALE = "scale=540:-2"
 JPEG_Q = "3"
 STATE = "Inspect this frame from a children's music video."
-THRESHOLD = 0.5  # 初篩門檻，尚未用人工標記資料校準，不能視為答對機率
+THRESHOLD = 0.2  # 初篩門檻（2026-10-16 由 0.5 降到 0.2：實測身體融合的明顯缺陷畫面只得 38%）；尚未用人工標記資料校準，不能視為答對機率
 QUESTIONS = {
     "child_safety": {
         "type": "noul",
@@ -64,6 +64,14 @@ def _load(path: Path) -> dict | None:
 
 def _status(scores: dict) -> str:
     return "flagged" if any(v["score"] >= THRESHOLD for v in scores.values()) else "passed"
+
+
+def restate(summary: dict) -> dict:
+    """門檻只影響判定、不影響分數：已完成的 passed／flagged 依現行門檻重算狀態；error、running 等維持原狀。
+    沒有 scores 欄位（沒有證據可重算）的也維持原狀，不自行改判。"""
+    if summary.get("status") in ("passed", "flagged") and "scores" in summary:
+        return {**summary, "status": _status(summary["scores"]), "threshold": THRESHOLD}
+    return summary
 
 
 def _merge_best(scores: dict, key: str, entry: dict) -> None:
@@ -171,9 +179,8 @@ def check(job: "Job") -> dict:
             report = previous
             summary = report["summary"]
             if summary.get("status") in ("passed", "flagged"):
-                status = _status(summary["scores"])  # 分數沿用，狀態依現行門檻重算
-                if (summary["status"], summary.get("threshold")) != (status, THRESHOLD):
-                    summary.update(status=status, threshold=THRESHOLD)
+                if (restated := restate(summary)) != summary:  # 分數沿用，狀態依現行門檻重算
+                    summary.update(restated)
                     _save(path, report)
                 return summary
         report.update(
@@ -251,10 +258,9 @@ def combine(dirs: list[Path]) -> dict:
     states = []
     for directory in dirs:
         status = json.loads((directory / "status.json").read_text())
-        summary = status.get("visual_qc", {})
+        summary = restate(status.get("visual_qc", {}))  # 來源當時用的門檻不重要，分數依現行門檻重新判定
         state = summary.get("status", "not_checked")
-        # 來源若以不同門檻或抽樣率檢查，結果不能直接當成現行標準的通過
-        if summary.get("threshold", THRESHOLD) != THRESHOLD or summary.get("fps", FPS) != FPS:
+        if summary.get("fps", FPS) != FPS:  # 抽樣率不同，分數本身就不能直接比
             state = "not_checked"
         states.append(state)
         out["checked_frames"] += summary.get("checked_frames", 0)

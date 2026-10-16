@@ -5,7 +5,7 @@ from pathlib import Path
 
 import requests
 
-from . import comfy, config, jobs, nightly, pipeline, weekly, youtube
+from . import comfy, config, jobs, labeling, nightly, pipeline, weekly, youtube
 from .pipeline import STAGES
 
 
@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("jobs-json", help="（給 TUI 用，在 GX10 上跑）以 JSON 輸出所有作業的盤點")
     sub.add_parser("list", help="列出所有作業的狀態（待審核、已核准、已上傳…）")
     sub.add_parser("upload-approved", help="上傳所有已核准、尚未上傳的成片（私人）")
+    lb = sub.add_parser(
+        "visual-labels", help="（在 GX10 跑）抽出待人工標記的視覺 QC 畫面與盲標頁面，用來校準疑慮門檻"
+    )
+    lb.add_argument("out", type=Path, help="輸出資料夾（frames/、index.html、manifest.json）")
+    lb.add_argument("--top", type=int, default=40, help="分數最高的畫面張數")
+    lb.add_argument("--random", type=int, default=40, help="其餘畫面隨機抽幾張（檢查低分有沒有漏判）")
     sub.add_parser("bench", help="各階段耗時基準")
     sub.add_parser("check", help="檢查 workflow 用到的模型 ComfyUI 是否看得到")
     return ap
@@ -110,6 +116,8 @@ def main(argv=None):
     elif a.cmd == "weekly":
         for p in weekly.merge_all():
             print(p)
+    elif a.cmd == "visual-labels":
+        print(f"{labeling.export(a.out, a.top, a.random)} 張 → {a.out}/index.html")
     elif a.cmd == "bench":
         print(pipeline.bench())
     elif a.cmd == "check":

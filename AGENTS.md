@@ -30,7 +30,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、291 passed（約 25 秒）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、300 passed（約 25 秒）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -49,6 +49,7 @@ videomaker/
   comfy.py      ComfyUI client（/prompt→輪詢 /history→/view）、fill()（依 workflow_map.yaml 填值）、記憶體檢查、models_in()、missing_models()
   audio.py      librosa 拍點偵測、切點、frame_bounds
   wiki.py       英文維基百科抓取（小知識的唯一來源）：fetch() 回傳 Article（標題、永久連結、純文字）
+  labeling.py   視覺 QC 校準：抽出待人工標記的畫面（盲標頁面 + manifest）；CLI `visual-labels`
   visual_qc.py  clef-flash 視覺抽樣（2fps，只查成片實際用到的區段）；逐張原子保存、素材／區段／模型 digest 失效檢查、合輯結果彙整
   nightly.py    夜間排程：LLM 想主題、預估耗時 vs deadline、GPU 降溫等待、失敗重試一次、寫 history.jsonl
   weekly.py     週五合併：用 ffmpeg -c copy 把週一到四的同片型串成一支
@@ -56,7 +57,7 @@ videomaker/
   jobs.py       作業盤點（GX10 端 inventory）＋ Mac 端 ssh／rsync 操作（下載、remote_cli、刪除）
   tui.py        Textual 介面（只在 Mac 跑）；只管畫面，遠端動作與名稱檢查都在 jobs.py
 workflows/*.json     ComfyUI API 格式 workflow；workflow_map.yaml 記錄要替換的「節點 ID → 輸入名」
-tests/               test_pipeline.py（plan／audio／comfy／pipeline／nightly／youtube 的大雜燴）、test_tui.py、test_weekly.py
+tests/               test_pipeline.py（plan／audio／comfy／pipeline／nightly／youtube 的大雜燴）、test_tui.py、test_weekly.py、test_labeling.py
 ```
 
 ## 作業資料夾 = 狀態機
@@ -104,7 +105,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 
 **視覺 QC（visual_qc.py）**
 - 查的是 `mux` 實際放進成片的區段，不是整支原始鏡頭：區段由 `pipeline.slot_windows` 算（`mux` 同一份），改取用邏輯時兩邊會一起動，不要在 `visual_qc` 另寫一份。結果的 `time` 是素材內秒數、`final_time` 是成片時間。
-- fingerprint 含素材 hash、取用區段、問題、模型 digest、抽樣設定；**不含 `THRESHOLD`**（只影響判定）。調門檻只依已存分數重算狀態，不重跑 GPU。
+- fingerprint 含素材 hash、取用區段、問題、模型 digest、抽樣設定；**不含 `THRESHOLD`**（只影響判定）。調門檻只依已存分數重算狀態，不重跑 GPU；`visual_qc.restate` 是唯一的重算入口（`check` 快取命中、`combine`、`jobs.visual_summary` 都用它，所以舊作業依新門檻顯示、但不改 `status.json`）。
 - `check()` 取得本次 fingerprint 之前失敗（Ollama 離線等），要保留磁碟上既有結果、只標 `error`；`except` 是 `Exception`（刻意，否則檔案會永遠停在 `running`）。
 - `combine()`（週五合輯）fail-closed：只有全部來源明確 `passed` 且門檻、抽樣率與現行相同才算通過。
 - 基本 QC（解析度、長度、音軌、響度、黑畫面）失敗時不跑視覺檢查；`meta.json` 的 `models.visual_qc` 只在確實有畫面送進模型時才寫，附 digest。
@@ -145,7 +146,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 
 ## 已知問題與待辦
 
-- 視覺 QC 是 clef-flash 每秒 2 張的初篩，50% 門檻未經校準，短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
+- 視覺 QC 是 clef-flash 每秒 2 張的初篩，門檻 20%（原 50%，實測 38% 的融合畫面會被放行）。2026-10-16 用 80 張人工標記（3 張有問題）初步驗證：20% 在 4 支作業上只標出 1 支（唯一明顯壞掉的），再降到 10% 會標出全部作業（4.2% 的畫面）卻只多抓 1 張；偵測器對細微缺陷幾乎無感（AUC 0.74、n 太小），所以門檻維持 20%（標記流程見 operations.md 的「校準門檻」），短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
 - Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
 - 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。
 - `LICENSES.md` 的企劃 LLM（`gpt-oss-20b-128k` 自訂 tag）授權尚未核對底層模型。

@@ -13,7 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import config
+from . import config, visual_qc
 
 JOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(-[a-z0-9]+)*$")
 GX10 = os.getenv("VMK_GX10", "gx10")  # ssh 別名
@@ -45,12 +45,12 @@ VISUAL_LABELS = {
 def visual_summary(directory: Path, status: dict) -> dict:
     path = directory / "visual_qc.json"
     if not path.exists():
-        return status.get("visual_qc", {})
+        return visual_qc.restate(status.get("visual_qc", {}))
     summary = json.loads(path.read_text())["summary"]
     # 行程被 kill（SIGKILL、斷電、OOM）後檔案會永遠停在 running；久沒有進度就當作中斷，不能一直顯示「檢查中」
     if summary.get("status") == "running" and time.time() - path.stat().st_mtime > ACTIVE_SECONDS:
         return {**summary, "status": "error", "error": f"檢查中斷：超過 {ACTIVE_SECONDS // 60} 分鐘沒有進度"}
-    return summary
+    return visual_qc.restate(summary)  # 舊作業也依現行門檻顯示；不動 status.json，不重設人工審核
 
 
 def valid(name: str) -> bool:

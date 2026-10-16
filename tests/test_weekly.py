@@ -154,9 +154,9 @@ def test_weekly_inherits_visual_scores_and_never_marks_unchecked_sources_passed(
 
 
 @pytest.mark.parametrize(
-    "visual", [{"status": "weird"}, {"status": None}, {"status": "passed", "threshold": 0.9, "scores": {}}]
+    "visual", [{"status": "weird"}, {"status": None}, {"status": "passed", "fps": 4, "scores": {}}]
 )
-def test_combine_never_passes_unknown_status_or_other_threshold(work, visual):
+def test_combine_never_passes_unknown_status_or_other_sampling_rate(work, visual):
     first = _job(work, "2026-10-12_a", "short", "甲", 4)
     second = _job(work, "2026-10-13_b", "short", "乙", 3)
     (second / "status.json").write_text(json.dumps({"status": "approved", "visual_qc": visual}))
@@ -251,3 +251,22 @@ def test_merge_trivia_writes_separate_job_with_all_sources(work):
     meta = json.loads((out / "meta.json").read_text())
     assert meta["kind"] == "trivia" and meta["format"] == "weekly-trivia-short"
     Plan.model_validate(plan)  # 仍是合法 Plan，才能走原本的上傳流程
+
+
+def test_combine_judges_sources_by_current_threshold_not_the_one_they_were_checked_with(work):
+    first = _job(work, "2026-10-12_a", "short", "甲", 4)
+    second = _job(work, "2026-10-13_b", "short", "乙", 3)
+    entry = {"source": "clips/01.mp4", "time": 0}
+
+    def source(status, score):
+        summary = {
+            "status": status,
+            "threshold": 0.5,
+            "fps": 2,
+            "scores": {"visual_defect": {"score": score, **entry}},
+        }
+        (second / "status.json").write_text(json.dumps({"status": "approved", "visual_qc": summary}))
+        return weekly.visual_qc.combine([first, second])["status"]
+
+    assert source("passed", 0.3) == "flagged"  # 以舊的 50% 門檻通過，但按現行 20% 門檻要標有疑慮
+    assert source("flagged", 0.1) == "passed"  # 分數低於現行門檻，不再算有疑慮

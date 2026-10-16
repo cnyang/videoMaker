@@ -435,3 +435,14 @@ def test_inventory_reports_content_kind_and_defaults_old_jobs_to_kids(tmp_path, 
         (directory / "meta.json").write_text("{}")
     assert {r["name"]: r["kind"] for r in jobs.inventory()} == {GOOD[0]: "kids", GOOD[1]: "trivia"}
     assert jobs.KIND_ZH == {"kids": "兒童音樂", "trivia": "小知識"}
+
+
+def test_visual_summary_applies_current_threshold_to_saved_results(tmp_path):
+    scores = {"visual_defect": {"score": 0.38, "source": "clips/01.mp4", "time": 0.5}}
+    (tmp_path / "visual_qc.json").write_text(
+        json.dumps({"summary": {"status": "passed", "threshold": 0.5, "scores": scores}})
+    )
+    result = jobs.visual_summary(tmp_path, {})
+    assert result["status"] == "flagged" and result["threshold"] == 0.2  # 舊作業的畫面疑慮也要依新門檻顯示
+    only_status = {"visual_qc": {"status": "passed", "threshold": 0.5, "scores": {}}}
+    assert jobs.visual_summary(tmp_path / "none", only_status)["status"] == "passed"
