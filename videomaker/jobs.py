@@ -27,6 +27,7 @@ STATE_ZH = {
     "rejected": "不通過",
     "failed": "QC 失敗",
 }
+KIND_ZH = {"kids": "兒童音樂", "trivia": "小知識"}
 VISUAL_STATE_ZH = {
     "passed": "未見疑慮",
     "flagged": "有疑慮",
@@ -78,6 +79,7 @@ def inventory() -> list[dict]:
                 "topic": plan["topic"],
                 "title": plan.get("youtube", {}).get("title", ""),
                 "format": meta.get("format", "short"),
+                "kind": plan.get("kind", "kids"),  # kids = 兒童音樂；trivia = 小知識；舊作業沒有這欄
                 "status": st["status"] if st else None,
                 "duration": (st or {}).get("details", {}).get("duration"),
                 "youtube_id": meta.get("youtube_id"),

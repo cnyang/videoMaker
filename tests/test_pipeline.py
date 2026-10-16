@@ -913,13 +913,19 @@ def test_cli_images_accepts_one_or_two_dirs_and_passes_a_list(monkeypatch, tmp_p
     class FakeJob:
         dir = tmp_path
 
-    def fake_run(topic, upto, dry_run, resume, images, fmt):
-        seen.update(topic=topic, upto=upto, images=images, fmt=fmt)
+    def fake_run(topic, upto, dry_run, resume, images, fmt, kind):
+        seen.update(topic=topic, upto=upto, images=images, fmt=fmt, kind=kind)
         return FakeJob()
 
     monkeypatch.setattr(cli.pipeline, "run", fake_run)
     cli.main(["make", "主題", "--images", "x", "y", "--format", "long", "--stage", "keyframes"])
-    assert seen == {"topic": "主題", "upto": "keyframes", "images": [Path("x"), Path("y")], "fmt": "long"}
+    assert seen == {
+        "topic": "主題",
+        "upto": "keyframes",
+        "images": [Path("x"), Path("y")],
+        "fmt": "long",
+        "kind": "kids",
+    }
 
 
 class _FakeReq:
@@ -1364,10 +1370,12 @@ def test_nightly_default_plan_is_short_long_xl_everywhere():
     from videomaker import nightly
 
     assert nightly.NIGHT == ["short", "long", "xl"]
-    assert (
-        cli.build_parser().parse_args(["nightly"]).plan == "short,long,xl"
-    )  # CLI 預設與 cron（沒帶 --plan）一致
-    assert [f for f in nightly.NIGHT if f not in nightly.FORMATS] == []  # 每個片型都存在
+    args = cli.build_parser().parse_args(["nightly"])
+    assert args.plan is None and args.kind == "kids"  # 沒帶 --plan 時依 --kind 決定：kids 就是 NIGHT
+    assert nightly.PLANS == {"kids": ["short", "long", "xl"], "trivia": ["short", "long"]}
+    assert [
+        f for plan in nightly.PLANS.values() for f in plan if f not in nightly.FORMATS
+    ] == []  # 每個片型都存在
 
 
 def test_nas_publishing_removed_and_default_stage_is_qc():
@@ -1762,3 +1770,296 @@ def test_slot_windows_follow_mux_offsets_and_convert_to_seconds(tmp_path, monkey
         (1, 24, 48),
     ]  # 第二次用鏡頭 1 從第 24 幀起
     assert job.windows() == [(1, 0.0, 2.0, 0.0), (2, 0.0, 2.0, 2.0), (1, 1.0, 3.0, 4.0)]
+
+
+# ---------- 小知識（trivia） ----------
+_BODY = (
+    "The sea otter is a marine mammal native to the coasts of the northern and eastern North Pacific Ocean. "
+    "Adult sea otters typically weigh between 14 and 45 kilograms. Sea otters have the densest fur of any animal, "
+    "with up to 150,000 hairs per square centimetre. They use rocks as tools to crack open shellfish. "
+) * 8
+
+
+def _article(text=_BODY, zh=""):
+    from videomaker import wiki
+
+    return wiki.Article("Sea otter", "https://en.wikipedia.org/wiki/Sea_otter", 123, text, zh)
+
+
+def _facts(n=2):
+    quotes = [
+        "Sea otters have the densest fur of any animal",
+        "They use rocks as tools to crack open shellfish",
+    ]
+    texts = [
+        "Sea otters have the thickest fur of any animal.",
+        "Sea otters use rocks as tools to open shellfish.",
+    ]
+    return [
+        {"text": texts[i % 2] + " " * 0 + ("" if i < 2 else str(i)), "quote": quotes[i % 2]} for i in range(n)
+    ]
+
+
+def test_wiki_fetch_parses_article_and_rejects_unusable_pages(monkeypatch):
+    from videomaker import wiki
+
+    def reply(page):
+        class R:
+            def raise_for_status(self): ...
+            def json(self):
+                return {"query": {"pages": {"1": page}}}
+
+        monkeypatch.setattr(wiki.requests, "get", lambda *a, **k: R())
+
+    good = {
+        "title": "Sea otter",
+        "fullurl": "https://en.wikipedia.org/wiki/Sea_otter",
+        "revisions": [{"revid": 99}],
+        "extract": "x" * (wiki.MAX_CHARS + 500),
+        "langlinks": [{"lang": "zh", "*": "海獺 (動物)"}],
+    }
+    reply(good)
+    article = wiki.fetch("sea otter")
+    assert article.title == "Sea otter" and len(article.text) == wiki.MAX_CHARS
+    assert article.zh_title == "海獺"  # 消歧義括號去掉
+    reply({k: v for k, v in good.items() if k != "langlinks"})
+    assert wiki.fetch("sea otter").zh_title == ""
+    assert article.permalink == "https://en.wikipedia.org/wiki/Sea_otter?oldid=99"
+    for page, message in [
+        ({"title": "Nope", "missing": ""}, "沒有條目"),
+        ({**good, "pageprops": {"disambiguation": ""}}, "消歧義"),
+        ({**good, "extract": "short"}, "太短"),
+    ]:
+        reply(page)
+        with pytest.raises(ValueError, match=message):
+            wiki.fetch("x")
+
+
+def test_check_facts_requires_verbatim_quotes_from_the_article():
+    from videomaker.plan import Fact, check_facts
+
+    article = _article()
+    good = [Fact(**f) for f in _facts()]
+    check_facts(good, article, 2)
+    bad = {
+        "wrong count": (good[:1], "數量"),
+        "invented quote": ([good[0], Fact(text=good[1].text, quote="Sea otters can fly across the whole ocean quickly")], "找不到"),
+        "quote too short": ([good[0], Fact(text=good[1].text, quote="sea otter")], "至少 30"),
+        "not english": ([good[0], Fact(text="海獺很可愛，牠會用石頭敲開貝殼。" * 2, quote=good[1].quote)], "純英文"),
+        "too long": ([good[0], Fact(text="Sea otters " * 20, quote=good[1].quote)], "字元"),
+        "number not in quote": ([good[0], Fact(text="Sea otters have 99999 hairs on their fur.", quote=good[1].quote)], "數字"),
+        "duplicate": ([good[0], good[0]], "重複"),
+    }  # fmt: skip
+    for facts, message in bad.values():
+        with pytest.raises(ValueError, match=message):
+            check_facts(facts, article, 2)
+
+
+def _trivia_reply(facts):
+    return {
+        **_OK_PLAN,
+        "shots": [{"id": i, "prompt": "the otter waves"} for i in range(1, 6)],
+        "youtube": {
+            "title": "海獺小知識｜Sea Otter Facts for Kids",
+            "description": "海獺有最濃密的毛。\n牠們會用石頭敲開貝殼。\n\nSea otters have thick fur.\nThey use rocks as tools to open shells.\n\n#KidsFacts #FunFacts",
+            "tags": ["海獺", "小知識", "sea otter", "fun facts for kids", "kids learning"],
+        },
+        "facts": facts,
+        "sources": [{"title": "Made up", "url": "https://evil.example"}],  # LLM 自填的來源不可採信
+    }
+
+
+def test_trivia_make_plan_retries_on_invented_quotes_and_writes_source_itself(monkeypatch):
+    from videomaker import plan as planmod
+
+    invented = [
+        {
+            "text": "Sea otters can fly very fast over the sea.",
+            "quote": "Sea otters can fly very fast over the sea.",
+        }
+    ] * 2
+    replies = iter([_trivia_reply(invented), _trivia_reply(_facts())])
+    sent = []
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self): ...
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(self.body)}}]}
+
+    def fake_post(url, json=None, **kw):
+        sent.append(json["messages"])
+        return R(next(replies))
+
+    monkeypatch.setattr(planmod.requests, "post", fake_post)
+    plan = planmod.make_plan("Sea otter", 5, 120, article=_article(), n_facts=2)
+    assert len(sent) == 2 and "找不到" in sent[1][-1]["content"]  # 第一次捏造的 quote 被擋，錯誤丟回 LLM
+    assert plan.kind == "trivia" and plan.topic == "Sea otter" and len(plan.facts) == 2
+    assert [(x.title, x.url) for x in plan.sources] == [
+        ("Sea otter", "https://en.wikipedia.org/wiki/Sea_otter?oldid=123")
+    ]
+    assert "oldid=123" in plan.youtube.description and "CC BY-SA 4.0" in plan.youtube.description
+    assert "evil.example" not in plan.youtube.description
+    assert (
+        "Wikipedia article" in sent[0][1]["content"] and "THIS PLAN IS A KIDS TRIVIA" in sent[0][0]["content"]
+    )
+
+
+def test_fact_slots_split_slots_evenly_and_cover_everything():
+    assert pipeline.fact_slots(5, 2) == [(0, 2), (2, 5)]
+    assert pipeline.fact_slots(42, 6) == [(i * 7, i * 7 + 7) for i in range(6)]
+    spans = pipeline.fact_slots(75, 4)
+    assert spans[0][0] == 0 and spans[-1][1] == 75 and all(a[1] == b[0] for a, b in itertools.pairwise(spans))
+
+
+def _caption_job(tmp_path, facts):
+    from types import SimpleNamespace
+
+    from videomaker.plan import Fact
+
+    return SimpleNamespace(
+        p=lambda *parts: tmp_path.joinpath(*parts),
+        plan=SimpleNamespace(facts=[Fact(**f) for f in facts]),
+    )
+
+
+def test_caption_filters_time_each_fact_to_its_slots(tmp_path, monkeypatch):
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"x")
+    monkeypatch.setattr(config, "FONT", str(font))
+    job = _caption_job(tmp_path, _facts())
+    bounds = [0, 48, 96, 144, 192, 240]  # 5 個時段、每個 2 秒
+    chain = pipeline.caption_filters(job, bounds)
+    assert chain.count("drawtext=") == 2 and chain.startswith(",")
+    assert (
+        "gte(t,0.000)*lt(t,4.000)" in chain and "gte(t,4.000)*lt(t,10.000)" in chain
+    )  # 前 2 時段、後 3 時段
+    assert "expansion=none" in chain  # 字幕裡的 % 不當成 drawtext 語法
+    first = (tmp_path / "captions/01.txt").read_text()
+    assert "\n" in first and all(len(line) <= pipeline.CAPTION_WIDTH for line in first.splitlines())
+    assert pipeline.caption_filters(_caption_job(tmp_path, []), bounds) == ""  # 兒童音樂不加字幕
+    monkeypatch.setattr(config, "FONT", str(tmp_path / "missing.ttf"))
+    with pytest.raises(RuntimeError, match="字型"):
+        pipeline.caption_filters(job, bounds)
+
+
+def test_new_job_trivia_fetches_article_and_records_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(pipeline.wiki, "fetch", lambda title: _article())
+    seen = {}
+
+    def fake_make_plan(topic, n_shots, bpm, long=False, article=None, n_facts=0):
+        seen.update(article=article, n_facts=n_facts, n_shots=n_shots)
+        return Plan.model_validate(
+            {
+                **_OK_PLAN,
+                "slug": "sea-otter",
+                "shots": [{"id": i, "prompt": "the otter waves"} for i in range(1, n_shots + 1)],
+            }
+        )
+
+    monkeypatch.setattr(pipeline, "make_plan", fake_make_plan)
+    job = pipeline.new_job("Sea otter", fmt="long", kind="trivia")
+    assert seen["article"].title == "Sea otter" and seen["n_facts"] == 6
+    assert job.meta["kind"] == "trivia"
+    assert job.meta["wikipedia"] == {
+        "title": "Sea otter",
+        "url": "https://en.wikipedia.org/wiki/Sea_otter?oldid=123",
+        "license": "CC BY-SA 4.0",
+    }
+    with pytest.raises(ValueError, match="小知識只支援"):
+        pipeline.new_job("Sea otter", fmt="xl", kind="trivia")
+    with pytest.raises(ValueError, match="小知識只支援"):
+        pipeline.new_job("Sea otter", images=[tmp_path], kind="trivia")
+
+
+def test_suggest_trivia_topics_keeps_only_real_unused_articles(monkeypatch):
+    from videomaker import nightly, wiki
+
+    monkeypatch.setattr(
+        nightly, "_ask_topics", lambda prompt: ["Sea otter", "Not a page", "Mercury", "Giraffe", 5, "Mario"]
+    )
+
+    def fetch(title):
+        if title == "Not a page":
+            raise ValueError("沒有條目")
+        return wiki.Article({"Mercury": "Mercury (planet)"}.get(title, title), "u", 1, "t")
+
+    monkeypatch.setattr(nightly.wiki, "fetch", fetch)
+    # 已用過的、查無條目的、禁用字詞（Mario）、非字串都略過；用維基的正式標題（Mercury → Mercury (planet)）
+    assert nightly.suggest_trivia_topics(2, ["Sea otter"]) == ["Mercury (planet)", "Giraffe"]
+
+
+def test_suggest_trivia_topics_gives_up_after_three_attempts(monkeypatch):
+    from videomaker import nightly
+
+    asked = []
+    monkeypatch.setattr(nightly, "_ask_topics", lambda prompt: asked.append(1) or ["Not a page"])
+    monkeypatch.setattr(nightly.wiki, "fetch", lambda t: (_ for _ in ()).throw(ValueError("沒有條目")))
+    with pytest.raises(RuntimeError, match="小知識主題"):
+        nightly.suggest_trivia_topics(2, [])
+    assert len(asked) == 3
+
+
+def test_nightly_trivia_runs_short_and_long_and_records_kind(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(nightly, "suggest_topics", lambda n, avoid: pytest.fail("小知識不該用兒童主題"))
+    monkeypatch.setattr(nightly, "suggest_trivia_topics", lambda n, avoid: ["Sea otter", "Giraffe"][:n])
+    calls = []
+
+    class FakeJob:
+        def __init__(self, topic):
+            self.dir = tmp_path / topic
+            self.dir.mkdir()
+            (self.dir / "status.json").write_text(json.dumps({"status": "pending_review"}))
+
+        def p(self, name):
+            return self.dir / name
+
+    def fake_run(topic, fmt="short", resume=False, kind="kids"):
+        calls.append((topic, fmt, kind))
+        return FakeJob(topic)
+
+    monkeypatch.setattr(nightly.pipeline, "run", fake_run)
+    deadline = (datetime.now().astimezone() + timedelta(hours=20)).strftime("%H:%M")
+    res = nightly.nightly(deadline=deadline, kind="trivia", sleep=lambda s: None)
+    assert calls == [("Sea otter", "short", "trivia"), ("Giraffe", "long", "trivia")]
+    assert [r["kind"] for r in res] == ["trivia", "trivia"]
+    hist = [json.loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
+    assert {h["kind"] for h in hist} == {"trivia"}
+
+
+def test_trivia_make_plan_forces_the_wikipedia_chinese_name(monkeypatch):
+    from videomaker import plan as planmod
+
+    ok = _trivia_reply(_facts())
+    wrong = {**ok, "youtube": {**ok["youtube"], "title": "海海狸小知識｜Sea Otter Facts for Kids"}}
+    replies = iter([wrong, ok])
+    sent = []
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self): ...
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(self.body)}}]}
+
+    def fake_post(url, json=None, **kw):
+        sent.append(json["messages"])
+        return R(next(replies))
+
+    monkeypatch.setattr(planmod.requests, "post", fake_post)
+    plan = planmod.make_plan("Sea otter", 5, 120, article=_article(zh="海獺"), n_facts=2)
+    assert "use exactly this name" in sent[0][1]["content"] and "中文名稱「海獺」" in sent[1][-1]["content"]
+    assert "海獺" in plan.youtube.title and "海獺" in plan.youtube.description
+    # 簡體的中文名稱只當提示，不強制
+    yt = planmod.Youtube(title="長頸鹿｜Giraffe", description="x", tags=[])
+    planmod.check_zh_name(yt, "长颈鹿")
+    planmod.check_zh_name(yt, "")

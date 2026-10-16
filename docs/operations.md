@@ -63,8 +63,9 @@ videoMaker() {
 
 | 時間 | 動作 |
 |---|---|
-| 週一到週四 19:30 | 夜間排程自動啟動（提早到辦公室冷氣還開著的時段，避免 GPU 在夜間無空調時長時間滿載）：LLM 想 3 個新主題，依序產生 1 支短片（約 20 秒）+ 1 支長片（約 2:48）+ 1 支 5 分鐘版，狀態停在「待審核」。實測約需 4 小時（約 23:30 到 00:20 結束），07:00 是硬性截止 |
-| 週五 19:30 | **週五合併**（只用 ffmpeg，不用 GPU）：把週一到週四產生的 short 串成 1 支、long 串成 1 支、xl 串成 1 支，作業名稱 `<日期>_weekly-short／weekly-long／weekly-xl`，同樣停在「待審核」。你已按「不通過」或 QC 失敗的不會被串進去；GX10 上已刪掉的也不會（所以週一到週四的存檔請等週五合併後再刪）。某片型本週可用的不到 2 支就略過 |
+| 週一、週三 19:30 | 夜間排程（兒童音樂）自動啟動（提早到辦公室冷氣還開著的時段，避免 GPU 在夜間無空調時長時間滿載）：LLM 想 3 個新主題，依序產生 1 支短片（約 20 秒）+ 1 支長片（約 2:48）+ 1 支 5 分鐘版，狀態停在「待審核」。實測約需 4 小時（約 23:30 到 00:20 結束），07:00 是硬性截止 |
+| 週二、週四 19:30 | 夜間排程（**小知識**）：LLM 想 2 個英文維基百科條目，依序產生 1 支短片 + 1 支長片（沒有 xl），畫面疊英文字幕、說明欄附維基來源，狀態同樣停在「待審核」。見[小知識影片](#小知識影片) |
+| 週五 19:30 | **週五合併**（只用 ffmpeg，不用 GPU），兒童音樂與小知識**分開**合併：兒童音樂把週一、週三的 short／long／xl 各串成 1 支（`<日期>_weekly-short／weekly-long／weekly-xl`）；小知識把週二、週四的 short／long 各串成 1 支（`<日期>_weekly-trivia-short／weekly-trivia-long`），說明欄列出全部來源。同樣停在「待審核」。你已按「不通過」或 QC 失敗的不會被串進去；GX10 上已刪掉的也不會（所以週一到週四的存檔請等週五合併後再刪）。某種內容的某片型本週可用的不到 2 支就略過 |
 | 早上（週二到週五） | 1. 輸入 `videoMaker` 開 TUI，每支一列，看狀態與兩處（GX10／Mac）是否都有<br>2. 若有「QC 失敗」「未完成」，到 `ssh gx10 'tail -40 ~/code/videoMaker/log/vmk-nightly.log'` 看原因<br>3. 選一列按 `d` 下載到 Mac，按 `o` 開啟看片<br>4. 好的按 `a` 核准，不好的按 `x` 不通過（也可以直接按 `u`：未核准時會問你要不要「先核准再上傳」）<br>5. 按 `U` 一次上傳所有已核准的（全部私人）<br>6. 到 YouTube Studio 逐支確認是「私人」且有「為兒童打造」，再手動改成公開或排程<br>7. 看完、傳完的，按 `g` 刪 GX10 的存檔（Mac 已下載時按 `y` 確認；Mac 沒有、那是唯一一份時要輸入 `DELETE`） |
 | 09:00 | Mac 的 LaunchAgent 自動檢查 GX10 的 YouTube token；過期會跳視窗，見 [YouTube 上傳與 token](#youtube-上傳與-token) |
 
@@ -147,10 +148,10 @@ export VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1
 ### `nightly` — 夜間排程本體
 
 ```
-videoMaker nightly [--plan short,long,xl] [--deadline 07:00] [--dry-run]
+videoMaker nightly [--kind kids|trivia] [--plan short,long,xl] [--deadline 07:00] [--dry-run]
 ```
 
-LLM 想不重複的繁體主題 → 依序產生。`--dry-run` 只想主題與預估，不產片。詳見[夜間排程](#夜間排程)。
+`--kind kids`（預設）：LLM 想不重複的繁體主題 → 依序產生 short、long、xl。`--kind trivia`：LLM 想英文維基百科條目 → 依序產生 short、long。`--dry-run` 只想主題與預估，不產片。詳見[夜間排程](#夜間排程)與[小知識影片](#小知識影片)。
 
 ### `weekly` — 週五合併
 
@@ -158,7 +159,7 @@ LLM 想不重複的繁體主題 → 依序產生。`--dry-run` 只想主題與�
 videoMaker weekly
 ```
 
-把本週（往前 6 天內）夜間排程產生、成片還在 GX10 上、狀態是待審核或已核准的作業，依片型各串成一支（`-c copy` 不重新編碼）。已存在同日的合併作業就略過；詳見[夜間排程](#夜間排程)。
+把本週（往前 6 天內）夜間排程產生、成片還在 GX10 上、狀態是待審核或已核准的作業，依「內容種類（兒童音樂／小知識）× 片型」各串成一支（`-c copy` 不重新編碼）；兩種內容不會混在一起。`history.jsonl` 沒有 `kind` 欄位的舊紀錄視為兒童音樂。已存在同日的合併作業就略過；詳見[夜間排程](#夜間排程)。
 
 ### `list` — 列出所有作業的狀態
 
@@ -281,23 +282,43 @@ videoMaker make "肉丸和Sunny跳舞" --images photos/meatball photos/sunny
 
 ---
 
-## 夜間排程
+## 小知識影片
 
-GX10 的 crontab（已安裝；你原本的排程沒動）：
+給兒童看的小知識短片（週二、週四夜間產生）。**每則知識都必須有來源**，做法是「先抓來源、再寫內容」，不信任 LLM 自己記得的事實或網址：
 
 ```
-30 19 * * 1-4 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
+LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消歧義頁、太短的直接略過）
+  → LLM 只能依抓到的條目寫 facts：每則 = 一句英文字幕 text + 條目原文的片段 quote
+  → 程式驗證：quote 逐字出現在條目裡（≥ 30 字元）、字幕裡的數字也出現在 quote 裡、字幕純英文且 ≤ 110 字元、不重複；不過就把錯誤丟回 LLM 重寫（最多 3 次）
+  → 來源由程式寫入 plan.sources 與 YouTube 說明欄（固定版本的永久連結 + CC BY-SA 4.0），不採用 LLM 填的網址
+```
+
+- **畫面與配樂**：和兒童音樂同一條管線（ACE-Step、FLUX、Wan，同樣的企劃內容規則，角色是條目主題的卡通版）。畫面上的 AI 仍然不准畫字。
+- **英文字幕**：`mux` 時用 ffmpeg `drawtext` 疊上去（程式畫的，不會亂碼），字型預設 GX10 內建的 DejaVu Sans Bold（`VMK_FONT` 可換）。每則 fact 平分時段（`plan.FACTS_PER`：short 2 則約 10 秒一則、long 6 則約 28 秒一則），字幕文字在作業的 `captions/NN.txt`。GX10 的 ffmpeg 有 drawtext，Mac 的沒有，所以本機跑不了含字幕的 `mux`。
+- **YouTube 欄位**：標題與說明維持中英雙語；說明欄最後固定附 `Source: Wikipedia, "<條目>" (<永久連結>), CC BY-SA 4.0.`。上傳照舊一律私人、人工核准、標「為兒童打造」。
+- **片型**：只有 short、long（沒有 xl，也不支援照片模式）。
+- **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱）；先用 `--dry-run` 看企劃。
+- **`meta.json` 與 `plan.json`**：`meta.wikipedia` 記條目標題、永久連結、授權；`plan.kind = "trivia"`、`plan.facts`（字幕與 quote）、`plan.sources`。
+- **限制（人工看片不可省）**：quote 驗證只保證「LLM 引用的原文真的存在」，不保證字幕對原文的改寫完全正確（例如把範圍寫成單一數字、省略但書）；字幕與條目對照仍要人工把關。維基條目會被編輯，永久連結固定在抓取當時的版本。
+
+## 夜間排程
+
+GX10 的 crontab（**新排程：程式已改好，部署到 GX10 前仍是舊的單行 `1-4`**；安裝後以 `ssh gx10 crontab -l` 為準）：
+
+```
+30 19 * * 1,3 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly --kind kids >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
+30 19 * * 2,4 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly --kind trivia >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
 30 19 * * 5 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock .venv/bin/python -m videomaker weekly >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
 ```
 
 行為：
 
-- **週一到週四**每晚 19:30 啟動（cron 的 `1-4`；週五是合併日、週末不跑），`--deadline 07:00` 前必須結束；預設 short、long、xl 各 1 支，由短到長依序執行；時間不夠時被略過的會是最耗時的 xl。
+- **週一、週三**（兒童音樂）與**週二、週四**（小知識）每晚 19:30 啟動（cron 的 `1,3` 與 `2,4`；週五是合併日、週末不跑），`--deadline 07:00` 前必須結束。兒童音樂預設 short、long、xl 各 1 支；小知識只有 short、long。都由短到長依序執行；時間不夠時被略過的是最耗時的那支。
 - 主題由 LLM 想：繁體中文短語，不得與 `history.jsonl` 和現有作業的主題重複，避開牙齒、嘴巴、飲食、水、洗澡、細軟物體這類容易畫壞的題材。
 - 每支開跑前預估耗時，「現在 + 預估」超過 deadline 就略過（記成 `skipped`），避免拖到白天占用 GPU。
 - 每支（含重試）開跑前先用 `nvidia-smi` 量 GPU 溫度，高於 `VMK_COOL_TEMP`（預設 45°C）就每 30 秒再量一次，降下來才開跑；等到「再不開跑就趕不上 deadline」仍沒降下來，該支記成 `skipped`。讀不到溫度（沒有 nvidia-smi）時不等。
 - 單支失敗：等 10 分鐘用 `--resume` 重試一次；仍失敗記成 `failed`，繼續下一支，不會整晚中斷。
-- 每支的主題、片型、狀態、錯誤都記在 `work/history.jsonl`。
+- 每支的主題、片型、內容種類（`kind`）、狀態、錯誤都記在 `work/history.jsonl`；週五合併靠 `kind` 把兩種內容分開。
 - **不會自動上傳 YouTube**（要你核准），也不再存 NAS。
 - `flock` 保證同一時間只有一個夜間任務；手動執行 `make` 不受它保護，**19:30 之後不要同時手動跑 GPU 工作**（會搶記憶體，夜間任務會因 `剩餘記憶體 … < 40GB` 失敗）。
 
@@ -354,6 +375,7 @@ launchctl bootout gui/$(id -u)/com.videomaker.tokencheck && rm ~/Library/LaunchA
 | `VMK_WORK` | `<專案>/work` | 作業資料夾根目錄 |
 | `VMK_MIN_FREE_GB` | `40` | 統一記憶體剩餘低於此值就中止該階段 |
 | `VMK_COOL_TEMP` | `45` | 夜間排程每支開跑前，GPU 要降到此溫度（°C）以下才開始；閒置實測約 36-37°C |
+| `VMK_FONT` | `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf` | 小知識英文字幕用的 TTF；檔案不存在時 `mux` 會直接報錯 |
 | `VMK_STEPS` | `20` | Wan 取樣步數。實測 40 步與 20 步細節看不出差別，卻慢 1.85 倍，所以維持 20 |
 | `VMK_YT_DIR` | `~/.config/videomaker` | `client_secret.json` 與 `token.json` 的資料夾 |
 | `VMK_GX10` | `gx10` | `renew-token` 與 TUI 連 GX10 用的 ssh 別名 |
@@ -401,7 +423,7 @@ QC 自動檢查（任一失敗標 `failed`）：解析度 1080×1920、片型長
 | character 至少 6 個英文字（物種、顏色、固定特徵） | 太短就無法跨鏡維持角色一致 |
 | 道具（`prop`）必須寫顏色，且各鏡提到該道具時顏色不能不同；程式把「holding `<prop>`」固定附在每鏡前面 | 避免各鏡牙刷一下藍一下粉 |
 | 禁用高風險字眼：teeth、tooth、mouth、lips、tongue、grin、floss、string、ribbon、rope、hose、cable、water、liquid、pour、splash、bubbles、foam、soap、toothpaste、bend、curve、stretch、twist 等（`toothbrush` 本身可以） | 牙齒與嘴巴會畫成怪牙；細長會彎的物體在影片裡會變形；液體與泡沫會糊成一團 |
-| 禁用文字類字眼：text、letters、sign、label、poster、writing、logo、caption 等 | 畫面不要出現 AI 生成的文字 |
+| 禁用文字類字眼：text、letters、sign、label、poster、writing、logo、caption 等 | 畫面不要出現 AI 生成的文字（小知識的英文字幕是 `mux` 時用 ffmpeg 疊上去的，不受影響） |
 | 禁用現有角色、品牌與「in the style of」 | 版權；清單只是第一道防線，另有人工審核 |
 | YouTube 標題 `繁體中文｜English title`（≤100 字元）；說明為中文兩句＋英文兩句＋3 到 5 個英文 hashtag；標籤至少 3 個英文 | 英文增加觸及率；超過 100 字元英文會被截斷 |
 | YouTube 欄位與主題不得含簡體字 | 偵測用常見簡體專有字清單，不是完整簡繁轉換，冷門字可能漏網 |
@@ -453,7 +475,7 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 
 - 套件新增依賴後，GX10 的 venv 要手動 `pip install`（例如 `google-api-python-client`、`google-auth-oauthlib` 已裝）。
 - 設定的 workflow 是 ComfyUI API 格式，放在 `workflows/*.json`；要替換的節點欄位記在 `workflow_map.yaml`。
-- `git` 目前沒有任何 commit；`meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`（GX10 沒有 git repo）。
+- GX10 沒有 git repo（rsync 不帶 `.git`），所以 `meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`。
 
 ---
 

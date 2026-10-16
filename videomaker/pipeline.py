@@ -6,14 +6,16 @@ import logging
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 
-from . import audio, config, visual_qc
+from . import audio, config, visual_qc, wiki
 from .comfy import Comfy, fill, models_in
-from .plan import FORMATS, Plan, build_layout, make_plan, shot_math
+from .plan import FACTS_PER, FORMATS, Plan, build_layout, make_plan, shot_math
 
 log = logging.getLogger("videomaker")
 STAGES = ["plan", "music", "keyframes", "clips", "mux", "qc"]
@@ -21,6 +23,7 @@ SIZE = (704, 1280)  # Wan 2.2 TI2V-5B 官方只支援 704x1280，不能亂改
 FPS = 24  # 5B 原生 24fps，不補幀
 REUSE_OFFSETS = (0, 24, 12)  # 長片重複使用同一鏡頭時，第 1、2、3 次從第 0、24、12 幀開始取
 LENGTH = 121  # 幀數必須是 4n+1；121 幀 @24fps ≈ 5.04 秒
+CAPTION_WIDTH = 26  # 字幕每行字元數：1080 寬、字級 54 的 DejaVu Sans Bold 約排 26～27 個字元
 
 
 def _git_hash() -> str:
@@ -163,13 +166,19 @@ def _use_photos(plan: Plan, srcs: list[Path], d: Path) -> list[dict]:
     return used
 
 
-def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short") -> Job:
+def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", kind: str = "kids") -> Job:
     t = time.monotonic()
     bpm = config.DEFAULT_BPM
     _, n_slots, _ = shot_math(bpm, fmt)
     n_unique = FORMATS[fmt]["unique"] or n_slots
     reuse = n_unique < n_slots  # 獨特鏡頭比時段少 → 要重複使用（long、xl）；用這個判斷，不要寫死片型名稱
-    plan = make_plan(topic, n_unique, bpm, long=reuse)
+    article = None
+    if kind == "trivia":  # 小知識：topic 就是英文維基百科條目名稱，先抓條目，LLM 只能依它寫
+        if fmt not in FACTS_PER or images:
+            raise ValueError(f"小知識只支援片型 {'／'.join(FACTS_PER)}，且不能搭配照片模式")
+        article = wiki.fetch(topic)
+    extra = {"article": article, "n_facts": FACTS_PER[fmt]} if article else {}  # 兒童音樂維持原本的呼叫方式
+    plan = make_plan(topic, n_unique, bpm, long=reuse, **extra)
     if reuse:
         plan.layout = build_layout(n_unique, n_slots, plan.seed)
     day = f"{datetime.now().astimezone():%Y-%m-%d}"
@@ -191,6 +200,9 @@ def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short") ->
         "llm": config.LLM_MODEL,
         "bpm_set": bpm,
     }
+    if article:  # 來源證據：條目標題、固定版本的連結與授權
+        meta["kind"] = "trivia"
+        meta["wikipedia"] = {"title": article.title, "url": article.permalink, "license": "CC BY-SA 4.0"}
     if used:
         meta["images"] = used  # 使用者提供的照片（自有素材），記錄檔名與 sha256 當來源證據
     (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
@@ -464,6 +476,34 @@ def slot_windows(job: Job, bounds: list[int]) -> list[tuple[int, int, int]]:
     return out
 
 
+def fact_slots(n_slots: int, n_facts: int) -> list[tuple[int, int]]:
+    """把時段平分給各則知識（累積四捨五入，最後一則剛好到結尾）：回傳每則的 [起始時段, 結束時段)。"""
+    edges = [round(i * n_slots / n_facts) for i in range(n_facts + 1)]
+    return list(pairwise(edges))
+
+
+def caption_filters(job: Job, bounds: list[int]) -> str:
+    """小知識的英文字幕：每則在自己的時段內疊在畫面上。用 ffmpeg drawtext 畫（不是 AI 生成，文字不會亂碼）。"""
+    if not job.plan.facts:
+        return ""
+    font = Path(config.FONT)
+    if not font.exists():
+        raise RuntimeError(f"找不到字幕字型 {font}（用 VMK_FONT 指定另一個 TTF）")
+    job.p("captions").mkdir(exist_ok=True)
+    out = []
+    for i, (fact, (a, b)) in enumerate(
+        zip(job.plan.facts, fact_slots(len(bounds) - 1, len(job.plan.facts))), 1
+    ):
+        text = job.p("captions", f"{i:02d}.txt")  # 用檔案傳文字，不必處理 drawtext 的逸出規則
+        text.write_text("\n".join(textwrap.wrap(fact.text, CAPTION_WIDTH)), encoding="utf-8")
+        out.append(
+            f"drawtext=fontfile='{font}':textfile='{text}':expansion=none:fontsize=54:fontcolor=white:"
+            f"line_spacing=14:box=1:boxcolor=black@0.6:boxborderw=26:x=(w-text_w)/2:y=h*0.62:"
+            f"enable='gte(t,{bounds[a] / FPS:.3f})*lt(t,{bounds[b] / FPS:.3f})'"  # 相鄰兩則交界那一幀只顯示後一則
+        )
+    return "," + ",".join(out)
+
+
 def mux(job: Job):
     if job.p("final.mp4").exists() and job.p("thumb.jpg").exists():
         return
@@ -481,7 +521,10 @@ def mux(job: Job):
             f"[{i}:v]fps={fps},trim=start_frame={start}:end_frame={start + frames},setpts=PTS-STARTPTS,"
             f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v{i}]"
         )
-    chains.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0,format=yuv420p[v]")
+    chains.append(
+        "".join(f"[v{i}]" for i in range(n))
+        + f"concat=n={n}:v=1:a=0{caption_filters(job, bounds)},format=yuv420p[v]"
+    )
     with job.timed("mux"):
         # 音樂從第一個重拍起算、裁到 total、最後 1 秒淡出；兩段式 loudnorm 才準
         _ff(
@@ -622,8 +665,9 @@ def run(
     resume: bool = False,
     images: list[Path] | None = None,
     fmt: str = "short",
+    kind: str = "kids",
 ) -> Job:
-    job = (find_job(topic) if resume else None) or new_job(topic, images, fmt)
+    job = (find_job(topic) if resume else None) or new_job(topic, images, fmt, kind)
     fh = logging.FileHandler(job.p("run.log"), encoding="utf-8")
     log.addHandler(fh)
     try:

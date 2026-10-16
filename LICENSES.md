@@ -43,6 +43,17 @@ NAS `/volume1/comfyUI-model` 內的 MiniMax H3、LTX-2.3、FLUX.2 檔案**不得
 |---|---|---|---|
 | 兒童內容與畫面變形的自動抽樣 QC | Cloudflare/Clef-Flash → Ollama `clef-flash:9b` | Apache 2.0 | [上游模型卡](https://huggingface.co/Cloudflare/clef-flash) 與 [Ollama 模型卡](https://ollama.com/library/clef-flash) 皆標 Apache-2.0；上游基底為 Qwen3.5-9B；逐作業 digest 記於 `visual_qc.json` |
 
+## 小知識的資料與字型（2026-10-16）
+
+非模型，但同樣要有授權依據：
+
+| 用途 | 資料／檔案 | 授權 | 核對依據與義務 |
+|---|---|---|---|
+| 小知識的內容來源 | 英文維基百科條目文字（`videomaker/wiki.py` 經 MediaWiki API 抓取） | CC BY-SA 4.0 | [維基媒體使用條款](https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use)：內容採 CC BY-SA 授權，再利用須標示來源並以相同授權分享。影片說明欄固定附條目的永久連結與授權；字幕是 LLM 依條目改寫的一句話，來源與授權記在 `plan.json` 的 `sources` 與 `meta.json` 的 `wikipedia` |
+| 小知識的英文字幕 | DejaVu Sans Bold（GX10 內建 `/usr/share/fonts/truetype/dejavu/`） | Bitstream Vera 衍生的自由字型授權 | [DejaVu 授權](https://dejavu-fonts.github.io/License.html)允許使用、嵌入與散布；以 ffmpeg `drawtext` 渲染到影片，不隨專案散布字型檔 |
+
+不新增任何模型：小知識沿用本文件已列的企劃 LLM、ACE-Step、FLUX、Wan。
+
 ## 已取消（2026-10-05）
 
 路線 A（Wan 2.2 I2V-A14B、Lightning 4-step LoRA、Comfy-Org frame_interpolation／RIFE v4.25、`wan_2.1_vae`）已取消，未下載、未使用，

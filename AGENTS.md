@@ -30,7 +30,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、278 passed（約 25 秒）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、291 passed（約 25 秒）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -48,6 +48,7 @@ videomaker/
   pipeline.py   Job、new_job、各階段 music／keyframes／clips／mux／qc、slot_windows（mux 與視覺 QC 共用的取用區段）、照片模式（_use_photos）、run、bench
   comfy.py      ComfyUI client（/prompt→輪詢 /history→/view）、fill()（依 workflow_map.yaml 填值）、記憶體檢查、models_in()、missing_models()
   audio.py      librosa 拍點偵測、切點、frame_bounds
+  wiki.py       英文維基百科抓取（小知識的唯一來源）：fetch() 回傳 Article（標題、永久連結、純文字）
   visual_qc.py  clef-flash 視覺抽樣（2fps，只查成片實際用到的區段）；逐張原子保存、素材／區段／模型 digest 失效檢查、合輯結果彙整
   nightly.py    夜間排程：LLM 想主題、預估耗時 vs deadline、GPU 降溫等待、失敗重試一次、寫 history.jsonl
   weekly.py     週五合併：用 ffmpeg -c copy 把週一到四的同片型串成一支
@@ -94,6 +95,13 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 照片模式加的負向提示詞 `PHOTO_NEG` **含簡體字是刻意的**（Wan 官方負向提示詞就是簡體中文，workflow 裡的預設 `neg` 也是），不要被簡繁檢查「修正」——`SIMPLIFIED` 只套用在 YouTube 欄位與夜間主題。正向用 `only the dogs are in the scene` 而不寫否定句（Wan 對 "no hands" 反而容易畫出手）。
 - 關鍵幀有黑邊（`_has_black_bars`）會換 seed 重生最多 3 次，3 次後**不會報錯**而是沿用最後一張。
 
+**小知識（trivia，週二、週四）**
+- `Plan.kind`（`kids` 預設／`trivia`）、`facts`（字幕＋`quote`）、`sources`。**來源驗證在 `plan.check_facts`**：quote 必須逐字存在於抓到的條目、字幕數字必須出現在 quote。只在 `make_plan(article=...)` 套用，舊 plan.json 與合輯 plan 載入不受影響（`weekly` 的合輯 plan 是 `facts=[]`、`sources` 彙整）。
+- 來源由程式寫進 `plan.sources` 與 YouTube 說明欄，**不要改成採用 LLM 填的網址**；`plan.topic` 由程式覆寫成條目標題（`--resume` 靠 topic 找作業）。
+- 英文字幕在 `pipeline.caption_filters`（ffmpeg `drawtext`，GX10 有、Mac 沒有）；字型走 `VMK_FONT`。`plan.FACTS_PER` 同時決定「支援哪些片型」（short、long，沒有 xl）與每支幾則，`plan.KINDS` 是週五合併與夜間排程共用的「內容種類 → 片型」表。
+- 兒童音樂的呼叫路徑刻意沒變：`new_job` 只在小知識時才把 `article`／`n_facts` 傳給 `make_plan`，`nightly` 只在小知識時才把 `kind` 傳給 `pipeline.run`。`history.jsonl` 的 `kind` 缺省視為 `kids`（舊紀錄）。
+- 上傳仍然一律私人、人工核准、`selfDeclaredMadeForKids: True`。
+
 **視覺 QC（visual_qc.py）**
 - 查的是 `mux` 實際放進成片的區段，不是整支原始鏡頭：區段由 `pipeline.slot_windows` 算（`mux` 同一份），改取用邏輯時兩邊會一起動，不要在 `visual_qc` 另寫一份。結果的 `time` 是素材內秒數、`final_time` 是成片時間。
 - fingerprint 含素材 hash、取用區段、問題、模型 digest、抽樣設定；**不含 `THRESHOLD`**（只影響判定）。調門檻只依已存分數重算狀態，不重跑 GPU。
@@ -105,7 +113,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - **部分子指令的 stdout 是機器介面**：`jobs-json`（TUI 用 `json.loads`）、`token-status`（`remote_status` 取最後一行 `ok／expired／missing`）、`upload`（印影片 ID）。這些指令不要多印東西；人看的訊息走 `logging`（stderr）。
 - `tui` 是**延遲載入**（`__main__` 內 `from .tui import run`），因為 GX10 沒裝 Textual，夜間 cron 不能因此壞掉。其他頂層 import 也不要引入 GX10 沒有的套件。
 - TUI 在 GX10 上執行子指令（核准、不通過、上傳）一律經 `jobs.remote_cli`，它有**參數白名單**（`approve／reject／upload／upload-approved`、`-` 開頭選項、合法作業名）。新增 TUI 會遠端呼叫的子指令要加進去。
-- 週五合併產生的作業名是 `<日期>_weekly-<片型>`，同樣符合 `jobs.valid()`；`plan.json` 沿用第一支的 Plan 只換主題與 YouTube 文案，所以走原本的上傳流程。串接用 `-c copy`，靠各支都由同一條 `mux` 產生（編碼參數一致）。
+- 週五合併產生的作業名是 `<日期>_weekly-<片型>`（兒童音樂）或 `<日期>_weekly-trivia-<片型>`（小知識），同樣符合 `jobs.valid()`；`plan.json` 沿用第一支的 Plan 只換主題與 YouTube 文案，所以走原本的上傳流程。串接用 `-c copy`，靠各支都由同一條 `mux` 產生（編碼參數一致）。
 
 **夜間排程（nightly.py）**
 - 預估耗時 = 獨特鏡頭數 × `SEC_PER_STEP`(17.3) × `STEPS` + 其他階段，×1.15；「現在 + 預估」超過 deadline 就略過該支，不硬跑。每支（含重試）開跑前 `wait_cool`。
@@ -115,7 +123,8 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 
 | 想做 | 改哪裡 |
 |---|---|
-| 新片型 | `plan.FORMATS`；`__main__` 的 `--format` choices（寫死）；`nightly.NIGHT`／`estimate`；`weekly` 會自動走 `FORMATS`；補測試 |
+| 新片型 | `plan.FORMATS`；`__main__` 的 `--format` choices（寫死）；`nightly.NIGHT`／`estimate`；`plan.KINDS`（週五合併與夜間排程共用）；補測試 |
+| 新內容種類（像小知識） | `plan.Plan.kind` 的 Literal；`plan.KINDS`；`nightly.PLANS` 與主題建議；`__main__` 的 `--kind` choices（寫死）；`jobs.KIND_ZH`；`weekly._plan` 的合輯文案；週五 cron；補測試 |
 | 換／加 ComfyUI workflow | 以 **API 格式**匯出到 `workflows/`；`workflow_map.yaml` 加欄位對應；`LICENSES.md`、`models.txt`；`videoMaker check` 驗證；`test_workflow_node_refs_exist`／`test_workflows_match_live_object_info`（ComfyUI 連不上會 skip）會檢查對應 |
 | 新子指令 | `__main__.build_parser` + `main`；若 TUI 要遠端呼叫，加進 `jobs.remote_cli` 白名單 |
 | 新環境變數 | `config.py` + operations.md#環境變數 |

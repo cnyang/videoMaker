@@ -194,7 +194,7 @@ class VM(App):
         lines = [
             f"[b]{r['topic']}[/b]　{r['name']}",
             f"YouTube 標題：{r['title'] or '-'}",
-            f"片型：{r['format']}　長度：{r['duration'] or '-'} 秒　大小：{_mb(r['size'])}　照片模式：{'是' if r['photo'] else '否'}",
+            f"內容：{jobs.KIND_ZH.get(r.get('kind', 'kids'), '-')}　片型：{r['format']}　長度：{r['duration'] or '-'} 秒　大小：{_mb(r['size'])}　照片模式：{'是' if r['photo'] else '否'}",
             f"狀態：{state_text(r)}　　位置：GX10 {'有' if r['gx10'] else '無'} ／ Mac {'有' if r['mac'] else '無'}",
             f"Mac：{mac}" if r["mac"] else "Mac：尚未下載（按 d）",
             f"YouTube：https://studio.youtube.com/video/{r['youtube_id']}/edit"

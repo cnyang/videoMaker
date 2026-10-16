@@ -127,11 +127,18 @@ def test_merge_marks_failed_when_duration_does_not_match_sources(work, monkeypat
 
 def test_weekly_cli_runs_all_formats(work, monkeypatch, capsys):
     seen = []
-    monkeypatch.setattr(weekly, "merge", lambda fmt, now=None: seen.append(fmt) or (work / f"w-{fmt}" if fmt != "long" else None))  # fmt: skip
+    monkeypatch.setattr(weekly, "merge", lambda fmt, now=None, kind="kids": seen.append((kind, fmt)) or (work / f"w-{kind}-{fmt}" if fmt != "long" else None))  # fmt: skip
     cli.main(["weekly"])
-    assert seen == ["short", "long", "xl"]
+    # 兒童音樂與小知識各自合併；小知識沒有 xl
+    assert seen == [
+        ("kids", "short"),
+        ("kids", "long"),
+        ("kids", "xl"),
+        ("trivia", "short"),
+        ("trivia", "long"),
+    ]
     out = capsys.readouterr().out
-    assert "w-short" in out and "w-xl" in out and "w-long" not in out
+    assert "w-kids-short" in out and "w-kids-xl" in out and "w-trivia-short" in out and "-long" not in out
 
 
 def test_weekly_inherits_visual_scores_and_never_marks_unchecked_sources_passed(work):
@@ -186,3 +193,61 @@ def test_combine_status_priority(work, states, expected):
         (d / "status.json").write_text(json.dumps({"status": "approved", "visual_qc": {"status": state}}))
         dirs.append(d)
     assert weekly.visual_qc.combine(dirs)["status"] == expected
+
+
+def _hist(work, name, fmt, kind, day):
+    date = (FRI - timedelta(days=day)).isoformat(timespec="seconds")
+    entry = {"date": date, "topic": name, "format": fmt, "status": "pending_review", "job": name}
+    if kind:
+        entry["kind"] = kind  # 舊紀錄沒有 kind 欄位
+    with (work / "history.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _trivia_job(work, name, topic, day):
+    d = _job(work, name, "short", topic, day)
+    plan = json.loads((d / "plan.json").read_text())
+    plan.update(
+        kind="trivia",
+        facts=[],
+        sources=[
+            {
+                "title": topic,
+                "url": f"https://en.wikipedia.org/wiki/{topic}?oldid=1",
+                "license": "CC BY-SA 4.0",
+            }
+        ],
+    )
+    (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False))
+    return d
+
+
+def test_sources_keep_kids_and_trivia_apart_and_old_history_counts_as_kids(work):
+    # _job 已經寫了不帶 kind 的紀錄（舊格式）→ 兒童音樂；再加上有 kind 的紀錄
+    kids = _job(work, "2026-10-12_a", "short", "甲", 4)
+    _trivia_job(work, "2026-10-13_t", "Otter", 3)
+    work_hist = work / "history.jsonl"
+    lines = [json.loads(x) for x in work_hist.read_text().splitlines()]
+    lines[-1]["kind"] = "trivia"  # 最後一行是小知識那支
+    work_hist.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines))
+    assert weekly.sources("short", FRI) == [kids]
+    assert [d.name for d in weekly.sources("short", FRI, "trivia")] == ["2026-10-13_t"]
+
+
+def test_merge_trivia_writes_separate_job_with_all_sources(work):
+    for name, topic, day in (("2026-10-13_a", "Otter", 3), ("2026-10-15_b", "Giraffe", 1)):
+        _trivia_job(work, name, topic, day)
+    hist = [json.loads(x) for x in (work / "history.jsonl").read_text().splitlines()]
+    (work / "history.jsonl").write_text("".join(json.dumps({**x, "kind": "trivia"}) + "\n" for x in hist))
+    assert weekly.merge("short", FRI) is None  # 兒童音樂本週一支都沒有
+    out = weekly.merge("short", FRI, "trivia")
+    assert out == work / "2026-10-16_weekly-trivia-short"
+    plan = json.loads((out / "plan.json").read_text())
+    assert plan["kind"] == "trivia" and plan["facts"] == [] and len(plan["sources"]) == 2
+    description = plan["youtube"]["description"]
+    assert (
+        "Otter?oldid=1" in description and "Giraffe?oldid=1" in description and "CC BY-SA 4.0" in description
+    )
+    meta = json.loads((out / "meta.json").read_text())
+    assert meta["kind"] == "trivia" and meta["format"] == "weekly-trivia-short"
+    Plan.model_validate(plan)  # 仍是合法 Plan，才能走原本的上傳流程

@@ -17,3 +17,6 @@ COOL_TEMP = int(
     os.getenv("VMK_COOL_TEMP", "45")
 )  # 每支生成前 GPU 要降到此溫度（°C）以下才開跑；閒置實測約 36-37°C
 DEFAULT_BPM = 120
+FONT = os.getenv(
+    "VMK_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+)  # 小知識字幕用的字型（GX10 內建 DejaVu）

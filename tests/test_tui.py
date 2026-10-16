@@ -424,3 +424,14 @@ def test_visual_summary_treats_old_running_as_interrupted(tmp_path, age, state):
     os.utime(path, (time.time() - age, time.time() - age))
     result = jobs.visual_summary(tmp_path, {})
     assert result["status"] == state and ("error" in result) is (state == "error")
+
+
+def test_inventory_reports_content_kind_and_defaults_old_jobs_to_kids(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    for name, plan in ((GOOD[0], {"topic": "小貓"}), (GOOD[1], {"topic": "Sea otter", "kind": "trivia"})):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "plan.json").write_text(json.dumps(plan))
+        (directory / "meta.json").write_text("{}")
+    assert {r["name"]: r["kind"] for r in jobs.inventory()} == {GOOD[0]: "kids", GOOD[1]: "trivia"}
+    assert jobs.KIND_ZH == {"kids": "兒童音樂", "trivia": "小知識"}

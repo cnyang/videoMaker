@@ -12,6 +12,7 @@ import requests
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import config
+from .wiki import Article
 
 log = logging.getLogger("videomaker")
 
@@ -124,6 +125,17 @@ class Youtube(BaseModel):
     tags: list[str] = []
 
 
+class Fact(BaseModel):
+    text: str  # 疊在畫面上的英文字幕（一句話）
+    quote: str  # 維基條目裡的原文片段；程式驗證它真的在條目裡，這則知識才算有來源
+
+
+class Source(BaseModel):
+    title: str
+    url: str  # 永久連結（指到抓取當時的版本）
+    license: str = "CC BY-SA 4.0"
+
+
 class Plan(BaseModel):
     topic: str
     slug: str = Field(pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -134,6 +146,9 @@ class Plan(BaseModel):
     shots: list[Shot] = Field(min_length=1)
     layout: list[int] = []  # 長片：每個時段播哪個鏡頭 id；空 = 每鏡各一次（短片）
     youtube: Youtube = Youtube()
+    kind: Literal["kids", "trivia"] = "kids"  # kids = 兒童音樂；trivia = 小知識（有英文字幕與來源）
+    facts: list[Fact] = []  # trivia：依序疊成字幕，每則平分時段
+    sources: list[Source] = []  # trivia：資料來源（維基百科條目）；合輯會有多筆
     seed: int = Field(default_factory=lambda: secrets.randbelow(2**31))  # 整支影片的 seed 基底，由程式產生
 
     @field_validator("style", "character")
@@ -204,6 +219,40 @@ FORMATS = {
 }
 
 
+# 小知識每支放幾則：字幕在各自的時段內一直顯示，short 約 10 秒一則、long 約 28 秒一則
+FACTS_PER = {"short": 2, "long": 6}
+KINDS = {"kids": list(FORMATS), "trivia": list(FACTS_PER)}  # 每種內容有哪些片型（週五合併也照這張表）
+FACT_MAX = 110  # 字幕最長字元數：1080 寬直式畫面一行約 26 字元，超過 5 行會蓋住畫面
+
+
+def check_facts(facts: list[Fact], article: Article, n: int) -> None:
+    """小知識必須有來源：每則附維基條目的原文片段，程式驗證它真的出現在抓到的條目裡；字幕裡的數字也必須出現在片段裡。"""
+    if len(facts) != n:
+        raise ValueError(f"facts 數量應為 {n}，得到 {len(facts)}")
+    body = " ".join(article.text.split())
+    for i, f in enumerate(facts, 1):
+        if not f.text.isascii() or not 20 <= len(f.text) <= FACT_MAX:
+            raise ValueError(
+                f"fact {i}.text 必須是 20～{FACT_MAX} 字元的純英文一句話（得到 {len(f.text)} 字元）"
+            )
+        if m := BANNED.search(f.text):
+            raise ValueError(f"fact {i}.text 含禁用字詞：{m.group(0)}")
+        quote = " ".join(f.quote.split())
+        if len(quote) < 30 or quote not in body:
+            raise ValueError(f"fact {i}.quote 必須逐字複製自條目原文（至少 30 字元），但在條目裡找不到")
+        if extra := set(re.findall(r"\d+", f.text)) - set(re.findall(r"\d+", quote)):
+            raise ValueError(f"fact {i}.text 的數字 {sorted(extra)} 沒有出現在它的 quote 裡")
+    if len({f.text.lower() for f in facts}) != n:
+        raise ValueError("facts 不可重複")
+
+
+def check_zh_name(yt: Youtube, zh: str) -> None:
+    """維基跨語言連結給的中文名稱若是繁體，標題與說明欄的中文必須用它：LLM 憑記憶常把冷門主題翻錯（sea otter 寫成海狸）。
+    簡體的只當提示給 LLM，不強制。"""
+    if zh and not SIMPLIFIED.search(zh) and (zh not in yt.title or zh not in yt.description):
+        raise ValueError(f"youtube.title 與 youtube.description 的中文必須使用這個主題的中文名稱「{zh}」")
+
+
 def shot_math(bpm: int, fmt: str = "short") -> tuple[float, int, float]:
     """2 小節 = 1 鏡（時段）。回傳 (每鏡秒數, 時段數, 理論總長)。"""
     f = FORMATS[fmt]
@@ -257,19 +306,44 @@ holding a short straight toothbrush and smiling, without ever mentioning teeth, 
 music.caption: instrument/mood tags only (e.g. "cheerful kids instrumental, ukulele, glockenspiel, light percussion")."""
 
 
+# 小知識追加規則：接在 _SYSTEM 後面，覆蓋兒童音樂的特定用語
+_TRIVIA = """
+THIS PLAN IS A KIDS TRIVIA VIDEO built from a Wikipedia article given by the user. Still instrumental music, but short English captions
+(from "facts") are overlaid on the video by the program. Add one more key to the JSON: "facts": [{"text": str, "quote": str}].
+Use ONLY what the article says; never add facts from memory. Each fact: "text" = ONE simple, true, child-friendly English sentence for ages 3-8
+(20-110 characters, pure ASCII, nothing scary, no death, disease, violence or danger); "quote" = a sentence or phrase of at least 30 characters
+copied VERBATIM from the article text that supports the fact (the program checks it appears in the article); every number in "text" must also appear in its "quote".
+Facts must be different from each other. The captions are drawn by the program, so shot prompts still must not mention text.
+character: the subject of the article drawn as a friendly cartoon (an animal, or a smiling cartoon object/planet with big friendly eyes); shots show it in varied simple scenes.
+youtube.title English part like "Sea Otter Facts for Kids"; hashtags like #KidsFacts #FunFacts #Learning instead of #KidsMusic; tags include "fun facts for kids", "kids learning"."""
+
+
 def extract_json(text: str) -> str:
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE)
     return text[text.index("{") : text.rindex("}") + 1]
 
 
-def make_plan(topic: str, n_shots: int, bpm: int, long: bool = False) -> Plan:
+def make_plan(
+    topic: str, n_shots: int, bpm: int, long: bool = False, article: Article | None = None, n_facts: int = 0
+) -> Plan:
     user = f'Topic: "{topic}". Exactly {n_shots} shots (ids 1..{n_shots}). music.bpm must be {bpm}.'
+    if article:
+        user += f' Exactly {n_facts} facts. Wikipedia article "{article.title}":\n"""\n{article.text}\n"""'
+        if article.zh_title:  # LLM 憑記憶常把冷門主題的中文名稱翻錯，所以直接給它維基上的中文名稱
+            user += f' Chinese name of this subject: "{article.zh_title}"' + (
+                " (Simplified form: write the Traditional Chinese name as used in Taiwan)."
+                if SIMPLIFIED.search(article.zh_title)
+                else ": use exactly this name in youtube.title and youtube.description."
+            )
     if long:
         user += (
             " This is a ~3 minute video: the shots will be replayed several times in different orders, so write varied, "
             "self-contained scenes (different settings and simple actions of the same character), not one story that needs a fixed order."
         )
-    msgs = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
+    msgs = [
+        {"role": "system", "content": _SYSTEM + (_TRIVIA if article else "")},
+        {"role": "user", "content": user},
+    ]
     err = None
     for attempt in range(3):
         r = requests.post(
@@ -288,8 +362,17 @@ def make_plan(topic: str, n_shots: int, bpm: int, long: bool = False) -> Plan:
             check_bilingual(plan.youtube)
             if len(plan.shots) != n_shots:
                 raise ValueError(f"shots 數量應為 {n_shots}，得到 {len(plan.shots)}")
+            if article:
+                check_facts(plan.facts, article, n_facts)
+                check_zh_name(plan.youtube, article.zh_title)
             plan.music.bpm = bpm  # BPM 由程式決定，LLM 只是附和
             plan.shots = [Shot(id=i + 1, prompt=s.prompt) for i, s in enumerate(plan.shots)]
+            if article:  # 來源由程式寫入，不信任 LLM 自己填的網址
+                plan.kind, plan.topic = "trivia", article.title
+                plan.sources = [Source(title=article.title, url=article.permalink)]
+                plan.youtube.description += (
+                    f'\n\nSource: Wikipedia, "{article.title}" ({article.permalink}), CC BY-SA 4.0.'
+                )
             return plan
         except ValueError as e:  # JSON 解析、pydantic 驗證（皆為 ValueError 子類）失敗：把錯誤丟回給 LLM 重試
             err = e

@@ -11,12 +11,14 @@ from datetime import datetime, timedelta
 
 import requests
 
-from . import config, pipeline
+from . import config, pipeline, wiki
 from .plan import BANNED, FORMATS, SIMPLIFIED, extract_json
 
 log = logging.getLogger("videomaker")
 # 每晚：短片、長片、5 分鐘各 1 支；由短到長，時間不夠時被略過的是最耗時的 xl
 NIGHT = ["short", "long", "xl"]
+NIGHT_TRIVIA = ["short", "long"]  # 小知識夜：短片與長片（沒有 xl）
+PLANS = {"kids": NIGHT, "trivia": NIGHT_TRIVIA}
 SEC_PER_STEP = 17.3  # Wan 5B 單鏡實測：20 步 ≈ 346 秒
 RETRY_WAIT = 600  # 一支失敗後等 10 分鐘再試一次（可能是白天殘留的記憶體占用或暫時性錯誤）
 COOL_POLL = 30  # 等降溫時每 30 秒量一次 GPU 溫度
@@ -71,6 +73,21 @@ def _past_topics() -> list[str]:
     return list(dict.fromkeys(topics))
 
 
+def _ask_topics(prompt: str) -> list:
+    """問 LLM 並解析出 {"topics": [...]}；網路錯誤維持 requests 的例外，格式不對丟 ValueError／KeyError／TypeError。"""
+    r = requests.post(
+        f"{config.LLM_URL}/chat/completions",
+        json={
+            "model": config.LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 1.0,
+        },
+        timeout=300,
+    )
+    r.raise_for_status()
+    return json.loads(extract_json(r.json()["choices"][0]["message"]["content"]))["topics"]
+
+
 def suggest_topics(n: int, avoid: list[str]) -> list[str]:
     """請 LLM 想 n 個新主題（繁體中文短語），不得與 avoid 重複。"""
     prompt = (
@@ -83,18 +100,8 @@ def suggest_topics(n: int, avoid: list[str]) -> list[str]:
         'Return ONLY JSON: {"topics": ["...", "..."]}'
     )
     for attempt in range(3):
-        r = requests.post(
-            f"{config.LLM_URL}/chat/completions",
-            json={
-                "model": config.LLM_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 1.0,
-            },
-            timeout=300,
-        )
-        r.raise_for_status()
         try:
-            raw = json.loads(extract_json(r.json()["choices"][0]["message"]["content"]))["topics"]
+            raw = _ask_topics(prompt)
         except (ValueError, KeyError, TypeError) as e:
             log.warning("主題第 %d 次解析失敗：%s", attempt + 1, e)
             continue
@@ -106,10 +113,42 @@ def suggest_topics(n: int, avoid: list[str]) -> list[str]:
     raise RuntimeError("LLM 3 次都想不出足夠的新主題")
 
 
-def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep) -> list[dict]:
-    plan = plan or NIGHT
+def suggest_trivia_topics(n: int, avoid: list[str]) -> list[str]:
+    """請 LLM 想英文維基百科條目名稱，逐一抓取驗證（存在、不是消歧義頁、夠長）；抓不到的略過，來源一定是真的條目。"""
+    prompt = (
+        f"Suggest {n + 4} different topics for kids trivia videos (ages 3-8). Each must be the EXACT title of an existing "
+        "English Wikipedia article about one specific animal, plant, planet, natural phenomenon or everyday object that "
+        "children love, with plenty of text on the page (for example: Sea otter, Giraffe, Rainbow). Safe for children: nothing "
+        "scary, dangerous, gory or political; no people, brands or fictional characters. "
+        f"Do NOT repeat any of: {'、'.join(avoid[-200:]) or '(none)'}. "
+        'Return ONLY JSON: {"topics": ["...", "..."]}'
+    )
+    good: list[str] = []
+    for attempt in range(3):
+        try:
+            raw = _ask_topics(prompt)
+        except (ValueError, KeyError, TypeError) as e:
+            log.warning("小知識主題第 %d 次解析失敗：%s", attempt + 1, e)
+            continue
+        for title in dict.fromkeys(t.strip() for t in raw if isinstance(t, str)):
+            if title in avoid or BANNED.search(title):
+                continue
+            try:
+                article = wiki.fetch(title)
+            except (ValueError, requests.RequestException) as e:
+                log.warning("維基百科條目 %s 不可用，略過：%s", title, e)
+                continue
+            if article.title not in avoid and article.title not in good:
+                good.append(article.title)
+            if len(good) >= n:
+                return good
+    raise RuntimeError(f"LLM 3 次都想不出足夠的小知識主題（需要 {n}，可用 {len(good)}）")
+
+
+def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="kids") -> list[dict]:
+    plan = plan or PLANS[kind]
     dl = deadline_after(datetime.now().astimezone(), deadline)
-    topics = suggest_topics(len(plan), _past_topics())
+    topics = (suggest_topics if kind == "kids" else suggest_trivia_topics)(len(plan), _past_topics())
     log.info("今晚主題：%s；deadline %s", topics, dl.strftime("%m-%d %H:%M"))
     results = []
     for fmt, topic in zip(plan, topics, strict=True):
@@ -117,6 +156,7 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep) -> lis
             "date": datetime.now().astimezone().isoformat(timespec="seconds"),
             "topic": topic,
             "format": fmt,
+            "kind": kind,  # 週五合併靠它把兒童音樂與小知識分開
         }
         if not dry_run:
             wait_cool(dl - timedelta(seconds=estimate(fmt)), sleep)  # 每支開跑前先等 GPU 降溫
@@ -126,7 +166,7 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep) -> lis
         elif dry_run:
             entry["status"] = "dry-run"
         else:
-            entry |= _run_with_retry(topic, fmt, dl, sleep)
+            entry |= _run_with_retry(topic, fmt, dl, sleep, kind)
         results.append(entry)
         if not dry_run:
             config.WORK.mkdir(parents=True, exist_ok=True)
@@ -135,11 +175,13 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep) -> lis
     return results
 
 
-def _run_with_retry(topic: str, fmt: str, dl: datetime, sleep) -> dict:
+def _run_with_retry(topic: str, fmt: str, dl: datetime, sleep, kind: str = "kids") -> dict:
     err = ""
     for attempt in range(2):
         try:
-            job = pipeline.run(topic, fmt=fmt, resume=attempt > 0)
+            job = pipeline.run(
+                topic, fmt=fmt, resume=attempt > 0, **({} if kind == "kids" else {"kind": kind})
+            )
             return {"status": json.loads(job.p("status.json").read_text())["status"], "job": job.dir.name}
         except Exception as e:  # noqa: BLE001 夜間排程不能被單支失敗拖垮：記錄後換下一支
             err = repr(e)

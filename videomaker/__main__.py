@@ -21,6 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="short",
         help="short ≈ 20 秒；long ≈ 2:48（Shorts 上限內）；xl ≈ 5:00（超過 3 分鐘，不再是 Shorts）。長片的鏡頭會重複使用",
     )
+    mk.add_argument(
+        "--kind",
+        choices=["kids", "trivia"],
+        default="kids",
+        help="kids = 兒童音樂；trivia = 小知識（topic 填英文維基百科條目名稱，片型只支援 short／long）",
+    )
     mk.add_argument("--dry-run", action="store_true", help="只產 plan.json，不呼叫 ComfyUI")
     mk.add_argument(
         "--images",
@@ -34,10 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     nt = sub.add_parser(
         "nightly", help="夜間排程：LLM 想主題，依序產生（預設 short、long、xl 各 1 支），deadline 前結束"
     )
-    nt.add_argument("--plan", default=",".join(nightly.NIGHT), help="片型順序，逗號分隔（short／long／xl）")
+    nt.add_argument(
+        "--kind", choices=["kids", "trivia"], default="kids", help="今晚產哪一種：兒童音樂或小知識"
+    )
+    nt.add_argument(
+        "--plan",
+        help="片型順序，逗號分隔（short／long／xl）；預設依 --kind：kids 三種、trivia 只有 short、long",
+    )
     nt.add_argument("--deadline", default="07:00", help="必須結束的時間 HH:MM")
     nt.add_argument("--dry-run", action="store_true", help="只想主題並預估，不產生影片")
-    sub.add_parser("weekly", help="週五合併：本週一到週四夜間產生的 short／long／xl 各串成一支（不用 GPU）")
+    sub.add_parser(
+        "weekly", help="週五合併：本週夜間產生的兒童音樂與小知識，各按片型分開串成一支（不用 GPU）"
+    )
     sub.add_parser("auth", help="YouTube OAuth 授權（在有瀏覽器的機器上跑一次）")
     for name, h in (
         ("approve", "人工核准一支成片（之後才能上傳）"),
@@ -91,7 +105,7 @@ def main(argv=None):
                 print(d.name, "失敗：", repr(e)[:300])
         raise SystemExit(1 if failed else 0)
     elif a.cmd == "nightly":
-        for r in nightly.nightly(a.plan.split(","), a.deadline, a.dry_run):
+        for r in nightly.nightly(a.plan.split(",") if a.plan else None, a.deadline, a.dry_run, kind=a.kind):
             print(json.dumps(r, ensure_ascii=False))
     elif a.cmd == "weekly":
         for p in weekly.merge_all():
@@ -104,7 +118,7 @@ def main(argv=None):
             print(f"缺：{f}（{wf}）")
         raise SystemExit(1 if miss else print("模型齊全"))
     else:
-        job = pipeline.run(a.topic, a.stage, a.dry_run, a.resume, a.images, a.format)
+        job = pipeline.run(a.topic, a.stage, a.dry_run, a.resume, a.images, a.format, a.kind)
         print(job.dir)
 
 
