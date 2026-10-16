@@ -751,6 +751,151 @@ def test_nightly_deadline_estimate_and_topics(monkeypatch):
     assert sum(nightly.estimate(f) for f in nightly.NIGHT) < 6 * 3600
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_topic_model_defaults_and_overrides(monkeypatch, override):
+    import runpy
+
+    monkeypatch.setenv("VMK_LLM_MODEL", "planning-only")
+    for kind in ("KIDS", "TRIVIA"):
+        monkeypatch.delenv(f"VMK_{kind}_TOPIC_MODEL", raising=False)
+        if override:
+            monkeypatch.setenv(f"VMK_{kind}_TOPIC_MODEL", f"custom-{kind.lower()}")
+    values = runpy.run_path(config.__file__)
+    assert values["KIDS_TOPIC_MODEL"] == ("custom-kids" if override else "qwen3.8:27b")
+    assert values["TRIVIA_TOPIC_MODEL"] == ("custom-trivia" if override else "gemma4:31b")
+    assert values["LLM_MODEL"] == "planning-only"
+
+
+@pytest.mark.parametrize("kind", ["kids", "trivia"])
+def test_topic_requests_use_model_for_kind(monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "KIDS_TOPIC_MODEL", "kids-model", raising=False)
+    monkeypatch.setattr(config, "TRIVIA_TOPIC_MODEL", "trivia-model", raising=False)
+    monkeypatch.setattr(config, "LLM_MODEL", "planning-only")
+    calls = []
+    topic = "小貓跳舞" if kind == "kids" else "Sea otter"
+
+    def post(url, *, json: dict, timeout):
+        calls.append(json["model"])
+        body = {"choices": [{"message": {"content": '{"topics": ["' + topic + '"]}'}}]}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+
+    monkeypatch.setattr(nightly.requests, "post", post)
+    monkeypatch.setattr(nightly.wiki, "fetch", lambda title: SimpleNamespace(title=title))
+    suggest = nightly.suggest_topics if kind == "kids" else nightly.suggest_trivia_topics
+    assert suggest(1, []) == [topic]
+    assert calls == [f"{kind}-model"]
+
+
+@pytest.fixture
+def nemotron_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "deploy_nemotron", config.ROOT / "scripts/deploy_nemotron.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_plan_models_follow_topic_configuration(monkeypatch, override):
+    import runpy
+
+    monkeypatch.delenv("VMK_LLM_MODEL", raising=False)
+    monkeypatch.setenv("VMK_KIDS_TOPIC_MODEL", "custom-kids" if override else "qwen3.8:27b")
+    monkeypatch.setenv("VMK_TRIVIA_TOPIC_MODEL", "custom-trivia" if override else "gemma4:31b")
+    values = runpy.run_path(config.__file__)
+    assert values["LLM_MODEL"] == ""
+    assert values["plan_model"]("kids") == values["KIDS_TOPIC_MODEL"]
+    assert values["plan_model"]("trivia") == values["TRIVIA_TOPIC_MODEL"]
+
+
+@pytest.mark.parametrize("kind", ["kids", "trivia"])
+@pytest.mark.parametrize("override", ["", "manual-planner"])
+def test_topics_and_plans_share_model_and_record_actual_model(tmp_path, monkeypatch, kind, override):
+    from types import SimpleNamespace
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "LLM_MODEL", override)
+    monkeypatch.setattr(config, "KIDS_TOPIC_MODEL", "qwen3.8:27b")
+    monkeypatch.setattr(config, "TRIVIA_TOPIC_MODEL", "gemma4:31b")
+    topic = "小貓跳舞" if kind == "kids" else "Sea otter"
+    reply = (
+        _trivia_reply(_facts())
+        if kind == "trivia"
+        else {
+            **_OK_PLAN,
+            "youtube": _BILINGUAL_YT,
+            "shots": [{"id": i, "prompt": "the bear waves"} for i in range(1, 6)],
+        }
+    )
+    # 第一次企劃違規，重寫仍須使用同一模型，meta 也必須記錄真正的企劃模型。
+    replies = iter([{"topics": [topic]}, {**reply, "style": ""}, reply])
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"]["model"])
+        body = {"choices": [{"message": {"content": json.dumps(next(replies))}}]}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+
+    monkeypatch.setattr(nightly.requests, "post", post)
+    monkeypatch.setattr(nightly.wiki, "fetch", lambda title: _article())
+    suggest = nightly.suggest_topics if kind == "kids" else nightly.suggest_trivia_topics
+    job = pipeline.new_job(suggest(1, [])[0], kind=kind)
+    topic_model = "qwen3.8:27b" if kind == "kids" else "gemma4:31b"
+    model = override or topic_model
+    assert calls == [topic_model, model, model]
+    assert job.meta["llm"] == json.loads(job.p("meta.json").read_text())["llm"] == model
+
+
+@pytest.mark.parametrize("busy", ["comfy", "ollama"])
+def test_nemotron_preserves_busy_services(monkeypatch, nemotron_script, busy):
+    calls = []
+
+    def api(url, data=None):
+        calls.append(url)
+        if url.endswith("/queue"):
+            return {"queue_running": [1] if busy == "comfy" else [], "queue_pending": []}
+        return {"models": [{"name": "in-use"}]}
+
+    monkeypatch.setattr(nemotron_script, "api", api)
+    with pytest.raises(RuntimeError, match="保留原狀"):
+        nemotron_script.prepare_gpu()
+    assert not any(url.endswith("/free") for url in calls)
+
+
+def test_nemotron_aborts_when_memory_is_low(monkeypatch, nemotron_script):
+    monkeypatch.setattr(nemotron_script, "available_gb", lambda: 39)
+    with pytest.raises(RuntimeError, match="40GiB"):
+        nemotron_script.ensure_memory()
+
+
+@pytest.mark.parametrize("image_answer", ["blue", "red", ""])
+def test_nemotron_verifies_actual_image_answer(monkeypatch, nemotron_script, image_answer):
+    calls = []
+
+    def api(url, data, timeout):
+        calls.append(data)
+        answer = "4" if len(calls) == 1 else image_answer
+        return {"choices": [{"finish_reason": "stop", "message": {"content": answer}}]}
+
+    monkeypatch.setattr(nemotron_script, "api", api)
+    if image_answer == "blue":
+        assert nemotron_script.verify() == {"text": "4", "image": "blue"}
+    else:
+        with pytest.raises(RuntimeError, match="image 推論驗證失敗"):
+            nemotron_script.verify()
+    content = calls[1]["messages"][0]["content"]
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_suggest_topics_filters_duplicates_and_retries(monkeypatch):
     from videomaker import nightly
 
@@ -967,6 +1112,10 @@ def _yt_job(tmp_path, status="approved", images=None):
     (d / "meta.json").write_text(json.dumps({"timings": {}, **({"images": images} if images else {})}))
     (d / "status.json").write_text(json.dumps({"status": status}))
     (d / "final.mp4").write_bytes(b"x" * 1000)
+    if status == "approved":
+        from videomaker import youtube
+
+        youtube.set_review(d, "approved")  # 測試中的已核准作業也必須綁定當時的成片
     return d
 
 
@@ -1443,9 +1592,12 @@ def visual_env(tmp_path, monkeypatch):
         )
 
     def ffmpeg(args, **kwargs):
-        assert "fps=2,scale=540:-2" in args
+        from types import SimpleNamespace
+
+        assert "showinfo" in args[args.index("-vf") + 1]
         for number in (1, 2):
             Path(args[-1] % number).write_bytes(b"jpeg")
+        return SimpleNamespace(stderr="n: 0 pts: 0 pts_time:0\nn: 1 pts: 12 pts_time:0.5")
 
     from pathlib import Path
 
@@ -1996,7 +2148,9 @@ def test_suggest_trivia_topics_keeps_only_real_unused_articles(monkeypatch):
     from videomaker import nightly, wiki
 
     monkeypatch.setattr(
-        nightly, "_ask_topics", lambda prompt: ["Sea otter", "Not a page", "Mercury", "Giraffe", 5, "Mario"]
+        nightly,
+        "_ask_topics",
+        lambda prompt, model: ["Sea otter", "Not a page", "Mercury", "Giraffe", 5, "Mario"],
     )
 
     def fetch(title):
@@ -2013,7 +2167,7 @@ def test_suggest_trivia_topics_gives_up_after_three_attempts(monkeypatch):
     from videomaker import nightly
 
     asked = []
-    monkeypatch.setattr(nightly, "_ask_topics", lambda prompt: asked.append(1) or ["Not a page"])
+    monkeypatch.setattr(nightly, "_ask_topics", lambda prompt, model: asked.append(1) or ["Not a page"])
     monkeypatch.setattr(nightly.wiki, "fetch", lambda t: (_ for _ in ()).throw(ValueError("沒有條目")))
     with pytest.raises(RuntimeError, match="小知識主題"):
         nightly.suggest_trivia_topics(2, [])
@@ -2170,10 +2324,14 @@ def test_trivia_resume_finds_the_job_by_canonical_wikipedia_title(tmp_path, monk
     monkeypatch.setattr(pipeline.wiki, "fetch", lambda title: _article())  # "sea otters" → "Sea otter"
     seen = []
     job = SimpleNamespace(p=lambda *parts: tmp_path.joinpath(*parts))
-    monkeypatch.setattr(pipeline, "find_job", lambda topic: seen.append(topic) or job)
+    monkeypatch.setattr(
+        pipeline,
+        "find_job",
+        lambda topic, fmt, kind: seen.append(topic) or (job if topic == "Sea otter" else None),
+    )
     monkeypatch.setattr(pipeline, "new_job", lambda *a, **k: pytest.fail("不該重開新作業"))
     assert pipeline.run("sea otters", dry_run=True, resume=True, kind="trivia") is job
-    assert seen == ["Sea otter"]
+    assert seen == ["sea otters", "Sea otter"]
 
 
 def test_nightly_rejects_formats_the_kind_does_not_support_before_doing_anything(monkeypatch):
@@ -2183,3 +2341,196 @@ def test_nightly_rejects_formats_the_kind_does_not_support_before_doing_anything
     with pytest.raises(ValueError, match="xl"):
         nightly.nightly(["short", "xl"], kind="trivia")
     assert nightly.PLANS["trivia"] == nightly.KINDS["trivia"]  # 只有一張表
+
+
+def test_review_binds_viewed_bytes_and_upload_rejects_changed_or_legacy_approval(tmp_path):
+    from videomaker import __main__ as cli
+    from videomaker import youtube
+
+    d = _yt_job(tmp_path)
+    digest = youtube.video_sha256(d)
+    (d / "final.mp4").write_bytes(b"new film")
+    with pytest.raises(ValueError, match="成片已變更"):
+        cli.main(["approve", str(d), "--sha256", digest])
+    service = _FakeYT([])
+    with pytest.raises(ValueError, match="重新人工核准"):
+        youtube.upload(d, service)
+    (d / "status.json").write_text(json.dumps({"status": "approved"}))
+    with pytest.raises(ValueError, match="重新人工核准"):
+        youtube.upload(d, service)
+    assert service.calls == []
+    cli.main(["approve", str(d), "--sha256", youtube.video_sha256(d)])
+    cli.main(["reject", str(d)])
+    assert "approved_sha256" not in json.loads((d / "status.json").read_text())
+
+
+def test_concurrent_uploads_create_only_one_video(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from videomaker import youtube
+
+    d = _yt_job(tmp_path)
+    entered, release, duplicate = Event(), Event(), Event()
+
+    class SlowRequest:
+        def next_chunk(self):
+            entered.set()
+            assert release.wait(5)
+            return None, {"id": "one"}
+
+    class Service(_FakeYT):
+        def insert(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) > 1:
+                duplicate.set()
+            return SlowRequest()
+
+    service = Service([])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(youtube.upload, d, service)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(youtube.upload, d, service)
+            assert not duplicate.wait(0.2)
+        finally:
+            release.set()
+        assert first.result(timeout=5) == second.result(timeout=5) == "one"
+    assert len(service.calls) == 1
+
+
+def test_upload_keeps_the_reviewed_open_file_if_mux_replaces_path(tmp_path):
+    from videomaker import youtube
+
+    d = _yt_job(tmp_path)
+    seen = []
+
+    class Service(_FakeYT):
+        def videos(self):
+            replacement = d / "final.tmp.mp4"
+            replacement.write_bytes(b"unreviewed replacement")
+            replacement.replace(d / "final.mp4")
+            return self
+
+        def insert(self, **kwargs):
+            media = kwargs["media_body"]
+            seen.append(media.getbytes(0, media.size()))
+            return _FakeReq([{"id": "reviewed-film"}])
+
+    assert youtube.upload(d, Service([])) == "reviewed-film"
+    assert seen == [b"x" * 1000]
+    assert (d / "final.mp4").read_bytes() == b"unreviewed replacement"
+
+
+def test_resume_filters_kind_and_format_and_orders_by_created_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+
+    def job(slug, fmt, kind, created):
+        d = tmp_path / slug
+        d.mkdir()
+        (d / "plan.json").write_text(json.dumps({**_OK_PLAN, "topic": "same", "kind": kind}))
+        (d / "meta.json").write_text(json.dumps({"format": fmt, "created_at": created}))
+        return d
+
+    job("2026-10-16_same-9", "long", "kids", "2026-10-16T09:00:00+08:00")
+    latest = job("2026-10-16_same-10", "long", "kids", "2026-10-16T10:00:00+08:00")
+    job("2026-10-16_z", "short", "kids", "2026-10-16T11:00:00+08:00")
+    job("2026-10-16_zz", "long", "trivia", "2026-10-16T12:00:00+08:00")
+    assert pipeline.run("same", fmt="long", resume=True, dry_run=True).dir == latest
+    monkeypatch.setattr(pipeline.wiki, "fetch", lambda title: pytest.fail("既有作業不應依賴網路"))
+    assert pipeline.run("same", fmt="long", kind="trivia", resume=True, dry_run=True).plan.kind == "trivia"
+
+
+@pytest.mark.parametrize("keep_previous", [False, True])
+def test_mux_interruption_keeps_previous_final_and_retry_does_not_skip(tmp_path, monkeypatch, keep_previous):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    if keep_previous:
+        (tmp_path / "final.mp4").write_bytes(b"old final")
+    else:
+        (tmp_path / "thumb.jpg").write_bytes(b"old thumbnail")
+    (tmp_path / "status.json").write_text('{"status":"approved"}')
+    (tmp_path / "beats.json").write_text('{"cuts":[0,4],"t0":0}')
+    job = SimpleNamespace(
+        p=lambda *parts: tmp_path.joinpath(*parts),
+        plan=SimpleNamespace(facts=[]),
+        timed=lambda stage: nullcontext(),
+    )
+    monkeypatch.setattr(pipeline, "slot_windows", lambda *a: [(1, 0, 96)])
+    monkeypatch.setattr(
+        pipeline,
+        "_measure",
+        lambda *a: dict.fromkeys(["input_i", "input_tp", "input_lra", "input_thresh", "target_offset"], "0"),
+    )
+    failed = []
+
+    def ff(*args):
+        dest = args[-1]
+        dest.write_bytes(b"completed")
+        if dest.name == "final.tmp.mp4" and not failed:
+            failed.append(True)
+            raise RuntimeError("encode interrupted")
+
+    monkeypatch.setattr(pipeline, "_ff", ff)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        pipeline.mux(job)
+    if keep_previous:
+        assert (tmp_path / "final.mp4").read_bytes() == b"old final"
+    else:
+        assert not (tmp_path / "final.mp4").exists()
+    assert not (tmp_path / "thumb.jpg").exists() and not (tmp_path / "status.json").exists()
+    pipeline.mux(job)
+    assert (tmp_path / "final.mp4").read_bytes() == b"completed"
+    assert (tmp_path / "thumb.jpg").read_bytes() == b"completed"
+
+
+def test_retry_does_not_start_when_cooling_used_up_remaining_time(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from videomaker import nightly
+
+    class Clock(datetime):
+        current = datetime.fromisoformat("2026-10-16T06:00:29+08:00")
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    calls = []
+
+    def fail(*a, **k):
+        calls.append(k)
+        raise RuntimeError("temporary failure")
+
+    def sleep(seconds):
+        Clock.current += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(nightly, "datetime", Clock)
+    monkeypatch.setattr(nightly, "estimate", lambda fmt: 1800)
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: 85)
+    monkeypatch.setattr(nightly.pipeline, "run", fail)
+    result = nightly._run_with_retry("t", "short", datetime.fromisoformat("2026-10-16T07:00:00+08:00"), sleep)
+    assert result["status"] == "failed" and len(calls) == 1
+
+
+@pytest.mark.parametrize("bad", [None, "小貓跳舞", [{"topic": "小貓跳舞"}], [5]])
+@pytest.mark.parametrize("kind", ["kids", "trivia"])
+def test_bad_topic_types_retry_instead_of_crashing_nightly(monkeypatch, bad, kind):
+    from types import SimpleNamespace
+
+    from videomaker import nightly
+
+    answers = iter([bad, ["小貓跳舞"] if kind == "kids" else ["Sea otter"]])
+    calls = []
+
+    def post(*a, **k):
+        calls.append(True)
+        body = {"choices": [{"message": {"content": json.dumps({"topics": next(answers)})}}]}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+
+    monkeypatch.setattr(nightly.requests, "post", post)
+    monkeypatch.setattr(nightly.wiki, "fetch", lambda title: SimpleNamespace(title=title))
+    suggest = nightly.suggest_topics if kind == "kids" else nightly.suggest_trivia_topics
+    assert suggest(1, []) == (["小貓跳舞"] if kind == "kids" else ["Sea otter"])
+    assert len(calls) == 2

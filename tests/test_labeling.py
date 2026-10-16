@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from videomaker import __main__ as cli
-from videomaker import config, labeling
+from videomaker import config, labeling, visual_qc
 
 
 def _job(work, name, scores):
@@ -18,7 +18,12 @@ def _job(work, name, scores):
         for i, s in enumerate(scores)
     ]  # fmt: skip
     digest = hashlib.sha256(b"clip").hexdigest()
-    report = {"frames": frames, "summary": {}, "inputs": [["clips/01.mp4", digest]]}
+    report = {
+        "frames": frames,
+        "summary": {},
+        "inputs": [["clips/01.mp4", digest]],
+        "sampling": visual_qc.SAMPLING,
+    }
     (d / "visual_qc.json").write_text(json.dumps(report))
     (d / "clips").mkdir()
     (d / "clips/01.mp4").write_bytes(b"clip")
@@ -85,7 +90,7 @@ def test_export_survives_one_failing_ffmpeg_call(tmp_path, monkeypatch):
     _job(work, "2026-10-15_a", [0.3, 0.1])
 
     def run(args, **kwargs):
-        if "0.5" in args:
+        if abs(float(args[args.index("-ss") + 1]) - 0.5) < 0.001:
             raise subprocess.CalledProcessError(1, args)
         Path(args[-1]).write_bytes(b"jpeg")
 
@@ -127,3 +132,58 @@ def test_each_export_stores_labels_under_its_own_key(tmp_path, monkeypatch):
     assert key(tmp_path / "same") == first  # 同一批畫面：沿用標記
     _job(work, "2026-10-16_b", [0.5])
     assert key(tmp_path / "two") != first  # 換了一批：舊標記不能套到新編號上
+
+
+def test_collect_rejects_legacy_scores_without_precise_sampling_times(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = _job(tmp_path, "2026-10-16_old", [0.3])
+    path = d / "visual_qc.json"
+    report = json.loads(path.read_text())
+    report.pop("sampling")
+    path.write_text(json.dumps(report))
+    assert labeling.collect() == []
+
+
+def test_real_extraction_and_labeling_use_identical_frames(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = tmp_path / "2026-10-16_frames"
+    (d / "clips").mkdir(parents=True)
+    source = d / "clips/01.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=64x64:r=24:d=2",
+            "-vf",
+            "geq=lum='5*N':cb=128:cr=128",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "0",
+            str(source),
+        ],
+        check=True,
+    )
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    frames = visual_qc._extract(source, extracted, 0)
+    assert [t for t, _ in frames] == [0, 0.5, 1, 1.5]
+    report = {
+        "sampling": visual_qc.SAMPLING,
+        "inputs": [["clips/01.mp4", hashlib.sha256(source.read_bytes()).hexdigest()]],
+        "summary": {},
+        "frames": [
+            {"source": "clips/01.mp4", "time": t, "scores": {"visual_defect": 0.1}} for t, _ in frames
+        ],
+    }
+    (d / "visual_qc.json").write_text(json.dumps(report))
+    out = tmp_path / "labels"
+    assert labeling.export(out, top=4, rand=0) == 4
+    expected = {t: p.read_bytes() for t, p in frames}
+    for row in json.loads((out / "manifest.json").read_text()):
+        assert (out / "frames" / row["id"]).read_bytes() == expected[row["time"]]

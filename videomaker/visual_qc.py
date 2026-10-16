@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ MODEL = "clef-flash:9b"
 FPS = 2
 SCALE = "scale=540:-2"
 JPEG_Q = "3"
+SAMPLING = "selected-pts-v1"
 STATE = "Inspect this frame from a children's music video."
 THRESHOLD = 0.2  # 初篩門檻（2026-10-16 由 0.5 降到 0.2：實測身體融合的明顯缺陷畫面只得 38%）；尚未用人工標記資料校準，不能視為答對機率
 QUESTIONS = {
@@ -99,12 +101,13 @@ def _sources(job: "Job") -> list[tuple[int | None, Path]]:
     return sources
 
 
-def _extract(source: Path, tmp: Path, index: int) -> list[Path]:
+def _extract(source: Path, tmp: Path, index: int) -> list[tuple[float, Path]]:
     pattern = tmp / f"{index}-%06d.jpg"
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(source), "-vf", f"fps={FPS},{SCALE}",
-             "-q:v", JPEG_Q, str(pattern)],
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-v", "info", "-i", str(source), "-vf",
+             f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{1 / FPS - 1e-6})',showinfo,{SCALE}",
+             "-fps_mode", "vfr", "-q:v", JPEG_Q, str(pattern)],
             capture_output=True, text=True, check=True,
         )  # fmt: skip
     except subprocess.CalledProcessError as error:
@@ -114,7 +117,11 @@ def _extract(source: Path, tmp: Path, index: int) -> list[Path]:
     frames = sorted(tmp.glob(f"{index}-*.jpg"))
     if not frames:
         raise ValueError(f"無法抽取畫面：{source.name}")
-    return frames
+    # fps 濾鏡的輸出時間不等於原始幀時間；記錄真正選到的 PTS，區段篩選與校準才能對上
+    times = [float(t) for t in re.findall(r"\bn:\s*\d+\s+pts:\s*-?\d+\s+pts_time:([-\d.e+]+)", result.stderr)]
+    if len(times) != len(frames):
+        raise ValueError(f"抽幀時間與畫面數量不一致：{source.name}")
+    return list(zip(times, frames, strict=True))
 
 
 def _ask(base: str, frame: Path, questions: dict) -> dict[str, float]:
@@ -170,7 +177,14 @@ def check(job: "Job") -> dict:
         if digest is None:
             raise ValueError(f"Ollama 找不到 {MODEL}，請先 ollama pull")
         # 會改變分數的都進指紋（素材、區段、問題、模型、抽樣設定）；THRESHOLD 只影響判定，不放進去
-        settings = {"model": MODEL, "fps": FPS, "scale": SCALE, "jpeg_q": JPEG_Q, "state": STATE}
+        settings = {
+            "model": MODEL,
+            "fps": FPS,
+            "scale": SCALE,
+            "jpeg_q": JPEG_Q,
+            "state": STATE,
+            "sampling": SAMPLING,
+        }
         fingerprint = hashlib.sha256(
             json.dumps([inputs, windows, questions, digest, settings], sort_keys=True).encode()
         ).hexdigest()
@@ -189,6 +203,7 @@ def check(job: "Job") -> dict:
             windows=windows,
             questions=questions,
             done=report.get("done", []),
+            sampling=SAMPLING,
         )
         summary = report["summary"]
         summary.update(status="running", model_digest=digest, threshold=THRESHOLD, fps=FPS)
@@ -204,8 +219,7 @@ def check(job: "Job") -> dict:
                 spans = (
                     [(0.0, float("inf"), 0.0)] if windows is None else [w[1:] for w in windows if w[0] == sid]
                 )
-                for number, frame in enumerate(_extract(source, Path(tmp), index)):
-                    t = number / FPS
+                for t, frame in _extract(source, Path(tmp), index):
                     finals = [
                         at + t - a for a, b, at in spans if a <= t < b
                     ]  # 沒落在任何時段的畫面不會出現在成片
@@ -256,6 +270,7 @@ def combine(dirs: list[Path]) -> dict:
         "scores": {},
     }
     states = []
+    elapsed = 0.0
     for directory in dirs:
         status = json.loads((directory / "status.json").read_text())
         summary = restate(status.get("visual_qc", {}))  # 來源當時用的門檻不重要，分數依現行門檻重新判定
@@ -267,7 +282,15 @@ def combine(dirs: list[Path]) -> dict:
         states.append(state)
         out["checked_frames"] += summary.get("checked_frames", 0)
         for key, value in summary.get("scores", {}).items():
-            _merge_best(out["scores"], key, {**value, "source": f"{directory.name}/{value['source']}"})
+            entry = {**value, "source": f"{directory.name}/{value['source']}"}
+            if "final_time" in entry:
+                if elapsed is None:
+                    entry.pop("final_time")  # 舊來源沒有長度時，寧可只顯示來源時間，不猜合輯位置
+                else:
+                    entry["final_time"] += elapsed
+            _merge_best(out["scores"], key, entry)
+        duration = status.get("details", {}).get("duration")
+        elapsed = elapsed + duration if elapsed is not None and isinstance(duration, (int, float)) else None
     # 只有全部來源明確 passed 才算通過；未知狀態一律視為未檢查，不可預設通過
     out["status"] = next(
         (s for s in ("error", "running", "not_checked", "flagged") if s in states),

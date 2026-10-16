@@ -36,7 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="照片模式：1 個資料夾 = 照片當每鏡關鍵幀；2 個資料夾 = 兩隻狗同框（每鏡各取一張用 Qwen-Image-Edit 合成）。"
         "可附同名 .txt 一行英文描述",
     )
-    mk.add_argument("--resume", action="store_true", help="續跑同主題最近一次的作業")
+    mk.add_argument(
+        "--resume", action="store_true", help="續跑同主題、同 --kind／--format 建立時間最新的作業"
+    )
     nt = sub.add_parser(
         "nightly", help="夜間排程：LLM 想主題，依序產生（預設 short、long、xl 各 1 支），deadline 前結束"
     )
@@ -58,7 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("reject", "標記一支成片為不通過"),
         ("upload", "上傳一支已核准的成片（私人）"),
     ):
-        sub.add_parser(name, help=h).add_argument("job", help="作業資料夾名（work/ 底下）或完整路徑")
+        review = sub.add_parser(name, help=h)
+        review.add_argument("job", help="作業資料夾名（work/ 底下）或完整路徑")
+        if name == "approve":
+            review.add_argument("--sha256", help="審核時觀看的成片 hash；與目前成片不同就拒絕核准")
     sub.add_parser("token-status", help="檢查本機 YouTube token 是否還有效（ok / expired / missing）")
     sub.add_parser(
         "renew-token", help="（在 Mac 跑）檢查 GX10 的 token，過期就跳視窗確認、重新授權並自動複製"
@@ -84,7 +89,11 @@ def main(argv=None):
     if a.cmd == "auth":
         youtube.auth()
     elif a.cmd in ("approve", "reject"):
-        youtube.set_review(youtube.resolve(a.job), "approved" if a.cmd == "approve" else "rejected")
+        youtube.set_review(
+            youtube.resolve(a.job),
+            "approved" if a.cmd == "approve" else "rejected",
+            expected_sha256=a.sha256 if a.cmd == "approve" else None,
+        )
     elif a.cmd == "upload":
         print(youtube.upload(youtube.resolve(a.job)))
     elif a.cmd == "token-status":

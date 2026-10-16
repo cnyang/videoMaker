@@ -9,6 +9,7 @@ Mac 端：用 ssh 呼叫 GX10，再合併本機已下載的狀態；下載、核
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -151,7 +152,7 @@ def download(job: str) -> Path:
         f"--include={f}"
         for f in ("final.mp4", "thumb.jpg", "plan.json", "meta.json", "status.json", "visual_qc.json")
     ]
-    r = _sh(["rsync", "-a", *keep, "--exclude=*", src, f"{dest}/"], timeout=1800)
+    r = _sh(["rsync", "-ac", *keep, "--exclude=*", src, f"{dest}/"], timeout=1800)
     if r.returncode or not (dest / "final.mp4").exists():
         raise RuntimeError(f"下載失敗：{(r.stderr or '找不到 final.mp4')[-200:].strip()}")
     return dest / "final.mp4"
@@ -173,3 +174,9 @@ def delete_gx10(job: str) -> None:
     r = _gx(f"rm -r {GX10_PROJECT}/work/{job}")
     if r.returncode:
         raise RuntimeError(f"刪除 GX10 存檔失敗：{r.stderr[-200:].strip()}")
+
+
+def delete_local(job: str) -> None:
+    """只刪除 Mac 下載目錄內的指定作業；rmtree 不會跟隨符號連結刪除外部檔案。"""
+    _need_valid(job)
+    shutil.rmtree(LOCAL / job)

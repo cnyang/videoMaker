@@ -281,3 +281,32 @@ def test_combine_does_not_trust_old_threshold_results_without_scores(work):
     assert (
         weekly.visual_qc.combine([first, second])["status"] == "not_checked"
     )  # 沒有分數，無法依現行門檻重判
+
+
+def test_combined_qc_times_include_preceding_videos_and_drop_unknown_offsets(tmp_path):
+    dirs = []
+    for i in range(2):
+        d = tmp_path / str(i)
+        d.mkdir()
+        status = {
+            "details": {"duration": 22.0},
+            "visual_qc": {
+                "status": "passed",
+                "scores": {
+                    "visual_defect": {
+                        "score": 0.01 + i / 10,
+                        "source": "clips/01.mp4",
+                        "time": 0.5,
+                        "final_time": 3.5,
+                    }
+                },
+            },
+        }
+        (d / "status.json").write_text(json.dumps(status))
+        dirs.append(d)
+    result = weekly.visual_qc.combine(dirs)
+    assert result["scores"]["visual_defect"]["final_time"] == 25.5
+    status = json.loads((dirs[0] / "status.json").read_text())
+    status.pop("details")
+    (dirs[0] / "status.json").write_text(json.dumps(status))
+    assert "final_time" not in weekly.visual_qc.combine(dirs)["scores"]["visual_defect"]

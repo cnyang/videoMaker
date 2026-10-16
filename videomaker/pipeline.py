@@ -80,11 +80,25 @@ class Job:
         log.info("[%s] 完成，累計 %.1fs → %s", stage, self.meta["timings"][stage], self.dir)
 
 
-def find_job(topic: str) -> Job | None:
-    for d in sorted(config.WORK.glob("*/plan.json"), reverse=True):
-        if json.loads(d.read_text())["topic"] == topic:
-            return Job(d.parent)
-    return None
+def find_job(topic: str, fmt: str, kind: str) -> Job | None:
+    candidates = []
+    for path in config.WORK.glob("*/plan.json"):
+        plan = json.loads(path.read_text())
+        if plan["topic"] != topic or plan.get("kind", "kids") != kind:
+            continue
+        job = Job(path.parent)
+        if job.fmt == fmt:
+            candidates.append(job)
+    # slug 與 -2／-10 的字典順序不是建立順序；舊作業沒有 created_at 時退回檔案時間
+    return max(
+        candidates,
+        key=lambda j: (
+            datetime.fromisoformat(j.meta["created_at"]).timestamp()
+            if j.meta.get("created_at")
+            else j.p("plan.json").stat().st_mtime
+        ),
+        default=None,
+    )
 
 
 # 照片模式：每鏡一個「隨節奏律動」的動作提示詞（動作小而慢，Wan 才不會把真實照片扭曲變形），依鏡頭輪流使用；key = 狗的數量
@@ -197,7 +211,7 @@ def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", ki
         "timings": {"plan": round(time.monotonic() - t, 1)},
         "models": {},
         "shots": {},
-        "llm": config.LLM_MODEL,
+        "llm": config.plan_model(kind),
         "bpm_set": bpm,
     }
     if article:  # 來源證據：條目標題、固定版本的連結與授權
@@ -526,6 +540,8 @@ def mux(job: Job):
         + f"concat=n={n}:v=1:a=0{caption_filters(job, bounds)},format=yuv420p[v]"
     )
     with job.timed("mux"):
+        job.p("status.json").unlink(missing_ok=True)  # 一旦開始重合成，舊核准就不能沿用
+        job.p("thumb.jpg").unlink(missing_ok=True)
         # 音樂從第一個重拍起算、裁到 total、最後 1 秒淡出；兩段式 loudnorm 才準
         _ff(
             "-ss",
@@ -543,7 +559,6 @@ def mux(job: Job):
             f"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
             f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true"
         )
-        job.p("status.json").unlink(missing_ok=True)  # 重合成後必須重跑 QC
         _ff(
             *inputs,
             "-i",
@@ -574,9 +589,11 @@ def mux(job: Job):
             "+faststart",
             "-t",
             f"{total:.4f}",
-            job.p("final.mp4"),
+            job.p("final.tmp.mp4"),
         )
-        _ff("-ss", 1, "-i", job.p("final.mp4"), "-frames:v", 1, "-q:v", 2, job.p("thumb.jpg"))
+        _ff("-ss", 1, "-i", job.p("final.tmp.mp4"), "-frames:v", 1, "-q:v", 2, job.p("thumb.tmp.jpg"))
+        job.p("final.tmp.mp4").replace(job.p("final.mp4"))
+        job.p("thumb.tmp.jpg").replace(job.p("thumb.jpg"))  # 兩份都成功，才會滿足「已完成就跳過」
     job.p("audio_trim.wav").unlink(missing_ok=True)
 
 
@@ -667,11 +684,11 @@ def run(
     fmt: str = "short",
     kind: str = "kids",
 ) -> Job:
-    if (
-        resume and kind == "trivia"
-    ):  # 小知識的 plan.topic 是維基正式標題；輸入 "sea otters" 也要找得到 "Sea otter"
+    job = find_job(topic, fmt, kind) if resume else None
+    if resume and job is None and kind == "trivia":  # 已有正式標題的作業可離線續跑；別名才需要查維基
         topic = wiki.fetch(topic).title
-    job = (find_job(topic) if resume else None) or new_job(topic, images, fmt, kind)
+        job = find_job(topic, fmt, kind)
+    job = job or new_job(topic, images, fmt, kind)
     fh = logging.FileHandler(job.p("run.log"), encoding="utf-8")
     log.addHandler(fh)
     try:

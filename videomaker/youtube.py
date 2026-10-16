@@ -4,11 +4,14 @@
 未通過 Google API 稽核的專案，videos.insert 上傳的影片會被強制為私人 → 一律以 private 上傳，由人在 Studio 手動公開。
 """
 
+import fcntl
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -78,16 +81,51 @@ def build_body(plan: Plan, meta: dict) -> dict:
     }
 
 
-def set_review(job_dir: Path, status: str) -> None:
+def video_sha256(job_dir: Path) -> str:
+    with (job_dir / "final.mp4").open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+@contextmanager
+def _locked(job_dir: Path):
+    # 鎖檔不能刪：不同 TUI／CLI 行程必須鎖住同一個 inode，才能保證只上傳一次
+    with (job_dir / ".upload.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _save(path: Path, data: dict) -> None:
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    temp.replace(path)
+
+
+def set_review(job_dir: Path, status: str, expected_sha256: str | None = None) -> None:
     """人工審核結果：approved / rejected，寫回 status.json。"""
-    path = job_dir / "status.json"
-    st = json.loads(path.read_text())
-    st |= {"status": status, "reviewed_at": datetime.now().astimezone().isoformat(timespec="seconds")}
-    path.write_text(json.dumps(st, ensure_ascii=False, indent=2) + "\n")
+    with _locked(job_dir):
+        path = job_dir / "status.json"
+        st = json.loads(path.read_text())
+        if status == "approved":
+            digest = video_sha256(job_dir)
+            if expected_sha256 is not None and digest != expected_sha256:
+                raise ValueError("成片已變更，請重新下載開啟後再人工核准")
+            st["approved_sha256"] = digest
+        else:
+            st.pop("approved_sha256", None)
+        st |= {"status": status, "reviewed_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+        _save(path, st)
 
 
 def upload(job_dir: Path, service=None) -> str:
     """上傳一支已核准的成片（私人）。已上傳過就直接回傳既有的 id（冪等）。"""
+    with _locked(job_dir):
+        return _upload(job_dir, service)
+
+
+def _upload(job_dir: Path, service) -> str:
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
 
@@ -95,40 +133,40 @@ def upload(job_dir: Path, service=None) -> str:
     meta = json.loads(meta_path.read_text())
     if meta.get("youtube_id"):
         return meta["youtube_id"]
-    status = json.loads((job_dir / "status.json").read_text())["status"]
+    review = json.loads((job_dir / "status.json").read_text())
+    status = review["status"]
     if status != "approved":
         raise ValueError(f"{job_dir.name} 狀態是 {status}，必須先人工核准（videomaker approve）才能上傳")
-    body = build_body(Plan.model_validate_json((job_dir / "plan.json").read_text()), meta)
-    req = (
-        (service or _service())
-        .videos()
-        .insert(
-            part="snippet,status",
-            body=body,
-            media_body=MediaFileUpload(
-                job_dir / "final.mp4", mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True
-            ),
-        )
+    media = MediaFileUpload(
+        job_dir / "final.mp4", mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True
     )
-    resp, retries = None, 0
-    while resp is None:
-        try:
-            _, resp = req.next_chunk()
-        except HttpError as e:  # 暫時性的伺服器錯誤：退避後續傳；其他（額度、權限）直接拋出
-            if e.resp.status in TRANSIENT and retries < 5:
-                retries += 1
-                log.warning("上傳遇到 %s，第 %d 次重試", e.resp.status, retries)
-                time.sleep(2**retries)
-                continue
-            raise
-    meta |= {
-        "youtube_id": resp["id"],
-        "youtube_uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "youtube_privacy": resp.get("status", {}).get("privacyStatus"),  # API 回傳的實際隱私狀態，當證據
-    }
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
-    log.info("已上傳（私人）：https://studio.youtube.com/video/%s/edit", resp["id"])
-    return resp["id"]
+    with media.stream() as stream:
+        stream.seek(0)  # MediaFileUpload 建構時會為了量長度把游標移到檔尾
+        # 驗證與上傳使用同一個已開啟檔案；合成途中 replace 路徑，也不會換成沒看過的新內容
+        if review.get("approved_sha256") != hashlib.file_digest(stream, "sha256").hexdigest():
+            raise ValueError("核准未綁定目前成片，請重新人工核准（videomaker approve）")
+        stream.seek(0)
+        body = build_body(Plan.model_validate_json((job_dir / "plan.json").read_text()), meta)
+        req = (service or _service()).videos().insert(part="snippet,status", body=body, media_body=media)
+        resp, retries = None, 0
+        while resp is None:
+            try:
+                _, resp = req.next_chunk()
+            except HttpError as e:  # 暫時性的伺服器錯誤：退避後續傳；其他（額度、權限）直接拋出
+                if e.resp.status in TRANSIENT and retries < 5:
+                    retries += 1
+                    log.warning("上傳遇到 %s，第 %d 次重試", e.resp.status, retries)
+                    time.sleep(2**retries)
+                    continue
+                raise
+        meta |= {
+            "youtube_id": resp["id"],
+            "youtube_uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "youtube_privacy": resp.get("status", {}).get("privacyStatus"),  # API 回傳的實際隱私狀態，當證據
+        }
+        _save(meta_path, meta)
+        log.info("已上傳（私人）：https://studio.youtube.com/video/%s/edit", resp["id"])
+        return resp["id"]
 
 
 def pending_approved() -> list[Path]:

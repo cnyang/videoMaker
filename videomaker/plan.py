@@ -409,6 +409,7 @@ def extract_json(text: str) -> str:
 def make_plan(
     topic: str, n_shots: int, bpm: int, long: bool = False, article: Article | None = None, n_facts: int = 0
 ) -> Plan:
+    model = config.plan_model("trivia" if article else "kids")
     user = f'Topic: "{topic}". Exactly {n_shots} shots (ids 1..{n_shots}). music.bpm must be {bpm}.'
     if article:
         user += f' Exactly {n_facts} facts. Wikipedia article "{article.title}":\n"""\n{article.text}\n"""'
@@ -431,7 +432,7 @@ def make_plan(
     for attempt in range(3):
         r = requests.post(
             f"{config.LLM_URL}/chat/completions",
-            json={"model": config.LLM_MODEL, "messages": msgs, "temperature": 0.7},
+            json={"model": model, "messages": msgs, "temperature": 0.7},
             timeout=600,
         )
         r.raise_for_status()

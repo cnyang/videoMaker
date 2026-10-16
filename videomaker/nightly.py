@@ -73,19 +73,22 @@ def _past_topics() -> list[str]:
     return list(dict.fromkeys(topics))
 
 
-def _ask_topics(prompt: str) -> list:
+def _ask_topics(prompt: str, model: str) -> list[str]:
     """問 LLM 並解析出 {"topics": [...]}；網路錯誤維持 requests 的例外，格式不對丟 ValueError／KeyError／TypeError。"""
     r = requests.post(
         f"{config.LLM_URL}/chat/completions",
         json={
-            "model": config.LLM_MODEL,
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 1.0,
         },
         timeout=300,
     )
     r.raise_for_status()
-    return json.loads(extract_json(r.json()["choices"][0]["message"]["content"]))["topics"]
+    topics = json.loads(extract_json(r.json()["choices"][0]["message"]["content"]))["topics"]
+    if not isinstance(topics, list) or not all(isinstance(t, str) for t in topics):
+        raise ValueError("topics 必須是字串陣列")
+    return topics
 
 
 def suggest_topics(n: int, avoid: list[str]) -> list[str]:
@@ -101,7 +104,7 @@ def suggest_topics(n: int, avoid: list[str]) -> list[str]:
     )
     for attempt in range(3):
         try:
-            raw = _ask_topics(prompt)
+            raw = _ask_topics(prompt, config.KIDS_TOPIC_MODEL)
         except (ValueError, KeyError, TypeError) as e:
             log.warning("主題第 %d 次解析失敗：%s", attempt + 1, e)
             continue
@@ -126,7 +129,7 @@ def suggest_trivia_topics(n: int, avoid: list[str]) -> list[str]:
     good: list[str] = []
     for attempt in range(3):
         try:
-            raw = _ask_topics(prompt)
+            raw = _ask_topics(prompt, config.TRIVIA_TOPIC_MODEL)
         except (ValueError, KeyError, TypeError) as e:
             log.warning("小知識主題第 %d 次解析失敗：%s", attempt + 1, e)
             continue
@@ -191,4 +194,6 @@ def _run_with_retry(topic: str, fmt: str, dl: datetime, sleep, kind: str = "kids
                     break
                 sleep(RETRY_WAIT)
                 wait_cool(dl - timedelta(seconds=estimate(fmt)), sleep)  # 重試也算一次開跑
+                if datetime.now().astimezone() + timedelta(seconds=estimate(fmt)) > dl:
+                    break  # 降溫也會耗時，真正重試前必須再守一次截止時間
     return {"status": "failed", "error": err}

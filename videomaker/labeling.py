@@ -10,7 +10,7 @@ import random
 import subprocess
 from pathlib import Path
 
-from . import config
+from . import config, visual_qc
 
 log = logging.getLogger("videomaker")
 
@@ -69,6 +69,9 @@ def collect() -> list[dict]:
     rows = []
     for path in sorted(config.WORK.glob("*/visual_qc.json")):
         report = json.loads(path.read_text())
+        if report.get("sampling") != visual_qc.SAMPLING:
+            log.warning("略過舊抽樣時間不精確的 QC 結果：%s；需重查後再校準", path.parent.name)
+            continue
         scored = dict(map(tuple, report.get("inputs", [])))
         same = {}
         for name, digest in scored.items():
@@ -111,8 +114,8 @@ def export(out: Path, top: int = 40, rand: int = 40) -> int:
             if not source.exists():
                 raise FileNotFoundError(source)
             subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-ss", str(row["time"]), "-i", str(source), "-frames:v", "1",
-                 "-vf", "scale=540:-2", "-q:v", "3", str(frames / name)],
+                ["ffmpeg", "-y", "-v", "error", "-ss", str(max(0, row["time"] - 1e-5)), "-i", str(source), "-frames:v", "1",
+                 "-vf", visual_qc.SCALE, "-q:v", visual_qc.JPEG_Q, str(frames / name)],
                 capture_output=True, check=True,
             )  # fmt: skip
         except (OSError, subprocess.CalledProcessError) as error:

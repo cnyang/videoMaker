@@ -30,7 +30,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、308 passed（約 25 秒）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、351 passed、1 skipped（約 36 秒）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -79,6 +79,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 ## 設計決定與陷阱
 
 **企劃（plan.py）**
+- 主題與分鏡預設共用模型（兒童音樂 `qwen3.8:27b`、小知識 `gemma4:31b`）以減少切換。`config.plan_model(kind)` 是企劃呼叫與 `meta.json.llm` 共用的選擇入口；`VMK_LLM_MODEL` 只有明確設定才覆寫企劃模型。
 - 內容規則（純英文、禁文字類字眼、禁高風險字眼、道具顏色固定、禁現有角色／品牌、簡體字偵測、雙語 YouTube 欄位）是**為了降低 FLUX／Wan 畫壞的機率**，規則表與原因在 operations.md#企劃內容規則。改規則要三處同步：regex、`_SYSTEM` 提示詞、測試。
 - **`style` 為空 = 照片模式**：`Plan._content_rules` 在 `style` 為空時整組跳過（提示詞來自使用者的照片描述）；`full_prompt()` 也靠它略過空欄位。
 - BPM 由程式決定（預設 120，允許 100–140），LLM 只是附和；鏡頭數也由 `shot_math` 算好告訴 LLM。
@@ -105,6 +106,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 上傳仍然一律私人、人工核准、`selfDeclaredMadeForKids: True`。
 
 **視覺 QC（visual_qc.py）**
+- 抽幀用 `select` 與 `showinfo` 記錄真正的來源 PTS；不要再用 `number / FPS` 當原始時間。`SAMPLING` 進 fingerprint，標記工具只接受相同抽樣版本，舊報告要重查才能校準。
 - 查的是 `mux` 實際放進成片的區段，不是整支原始鏡頭：區段由 `pipeline.slot_windows` 算（`mux` 同一份），改取用邏輯時兩邊會一起動，不要在 `visual_qc` 另寫一份。結果的 `time` 是素材內秒數、`final_time` 是成片時間。
 - fingerprint 含素材 hash、取用區段、問題、模型 digest、抽樣設定；**不含 `THRESHOLD`**（只影響判定）。調門檻只依已存分數重算狀態，不重跑 GPU；`visual_qc.restate` 是唯一的重算入口（`check` 快取命中、`combine`、`jobs.visual_summary` 都用它，所以舊作業依新門檻顯示、但不改 `status.json`）。
 - `check()` 取得本次 fingerprint 之前失敗（Ollama 離線等），要保留磁碟上既有結果、只標 `error`；`except` 是 `Exception`（刻意，否則檔案會永遠停在 `running`）。
@@ -112,6 +114,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 基本 QC（解析度、長度、音軌、響度、黑畫面）失敗時不跑視覺檢查；`meta.json` 的 `models.visual_qc` 只在確實有畫面送進模型時才寫，附 digest。
 
 **CLI 與遠端介面**
+- 核准綁 `status.json.approved_sha256`，TUI 的 `o` 先以 checksum 同步，記住開啟版本後才可核准；CLI 可傳 `approve --sha256`。上傳必須重驗 hash，舊核准無 hash 要人工重新核准，不可自動補值。`.upload.lock` 是跨行程鎖，不能刪掉重建。
 - **部分子指令的 stdout 是機器介面**：`jobs-json`（TUI 用 `json.loads`）、`token-status`（`remote_status` 取最後一行 `ok／expired／missing`）、`upload`（印影片 ID）。這些指令不要多印東西；人看的訊息走 `logging`（stderr）。
 - `tui` 是**延遲載入**（`__main__` 內 `from .tui import run`），因為 GX10 沒裝 Textual，夜間 cron 不能因此壞掉。其他頂層 import 也不要引入 GX10 沒有的套件。
 - TUI 在 GX10 上執行子指令（核准、不通過、上傳）一律經 `jobs.remote_cli`，它有**參數白名單**（`approve／reject／upload／upload-approved`、`-` 開頭選項、合法作業名）。新增 TUI 會遠端呼叫的子指令要加進去。
@@ -147,6 +150,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 
 ## 已知問題與待辦
 
+- 下列 80 張校準數據屬於舊抽幀規則，人工標記與模型畫面可能相差約 0.21 秒，須以新抽樣版本重查、重新人工標記後才能下結論；本次保留 20% 門檻，未自動重查或重設既有核准。
 - 視覺 QC 是 clef-flash 每秒 2 張的初篩，門檻 20%（原 50%，實測 38% 的融合畫面會被放行）。2026-10-16 用 80 張人工標記（3 張有問題）初步驗證：20% 在 4 支作業上只標出 1 支（唯一明顯壞掉的），再降到 10% 會標出全部作業（4.2% 的畫面）卻只多抓 1 張；偵測器對細微缺陷幾乎無感（AUC 0.74、n 太小），所以門檻維持 20%（標記流程見 operations.md 的「校準門檻」），短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
 - Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
 - 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。

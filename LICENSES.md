@@ -11,7 +11,17 @@
 | 音樂 | ACE-Step 1.5 → `ace_step_1.5_turbo_aio.safetensors`（Comfy-Org 重新打包） | MIT（上游）；重新打包頁標示 Apache-2.0，兩者皆寬鬆 | HF `ACE-Step/Ace-Step1.5` 卡片 `license: mit`、GitHub `ace-step/ACE-Step-1.5/LICENSE` 為 MIT；卡片明載可商用；`Comfy-Org/ace_step_1.5_ComfyUI_files` 標 apache-2.0 |
 | 影片 | Wan 2.2 TI2V-5B → `wan2.2_ti2v_5B_fp16.safetensors` | Apache 2.0 | HF `Wan-AI/Wan2.2-TI2V-5B` apache-2.0；GitHub `Wan-Video/Wan2.2/LICENSE.txt` 為 Apache 2.0；重新打包 `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` apache-2.0 |
 | 關鍵幀 | FLUX.1 [schnell] → `flux1-schnell-fp8.safetensors`（Comfy-Org 重新打包） | Apache 2.0 | GitHub `black-forest-labs/flux` README 與 `model_licenses/LICENSE-FLUX1-schnell` 標 apache-2.0（含 autoencoder 權重）；上游 HF 為 gated（需登入同意），重新打包版 `Comfy-Org/flux1-schnell` 標 apache-2.0 且不 gated |
-| 企劃 LLM | gpt-oss-20b（GX10 Ollama：`gpt-oss-20b-128k:latest`） | Apache 2.0（未於本次核對；自訂 tag，載入前請確認其底層模型） | 尚未核對 |
+| 舊企劃 LLM（已非預設） | gpt-oss-20b（GX10 Ollama：`gpt-oss-20b-128k:latest`） | Apache 2.0（未於本次核對；自訂 tag，載入前請確認其底層模型） | 尚未核對 |
+
+## 主題、分鏡企劃與獨立推論（2026-10-16，經使用者明確放行）
+
+| 用途 | 模型／檔案 | 授權 | 核對依據 |
+|---|---|---|---|
+| 兒童音樂主題與分鏡企劃（含提示詞、YouTube 文案） | Ollama `qwen3.8:27b`，本機 ID `22130167c4c2`、Q4_K_M | Apache 2.0 | [Qwen 上游模型卡](https://huggingface.co/Qwen/Qwen3.8-27B)、[Ollama 模型卡](https://ollama.com/library/qwen3.8:27b) 與 GX10 `/api/show` 的 license 均為 Apache 2.0 |
+| 小知識主題與分鏡企劃（含字幕、提示詞、YouTube 文案；來源仍由維基百科驗證） | Ollama `gemma4:31b`，本機 ID `6316f0629137`、Q4_K_M | Apache 2.0 | [Google 上游模型卡](https://huggingface.co/google/gemma-4-31B-it)、[Ollama 模型卡](https://ollama.com/library/gemma4:31b) 與 GX10 `/api/show` 的 license 均為 Apache 2.0 |
+| GX10 獨立文字／圖片推論，不接入影片管線 | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`，revision `579ffa0b659bc681b89e649fa7c2d5089399602e` | OpenMDW 1.1 | [NVIDIA 模型卡](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4) 標示可商用／非商用；依 [OpenMDW 1.1 條款](https://openmdw.ai/license/1-1/) 使用，保留下載的授權與說明檔；未放行其他變體或額外 drafter |
+
+主題與分鏡企劃預設共用各內容種類的模型，減少載入／卸載；`VMK_LLM_MODEL` 未設定時依內容種類選擇，明確設定才覆寫企劃模型。每支影片的 `meta.json.llm` 記錄實際企劃模型。
 
 ## 白名單未列的上游子元件（已核對，待你放行）
 

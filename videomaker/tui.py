@@ -107,6 +107,7 @@ class VM(App):
         Binding("u", "upload", "上傳"),
         Binding("U", "upload_all", "上傳全部已核准"),
         Binding("g", "delete_gx10", "刪GX10"),
+        Binding("m", "delete_local", "刪Mac"),
         Binding("T", "token", "token"),
         Binding("q", "quit", "離開"),
     ]
@@ -114,6 +115,7 @@ class VM(App):
     def __init__(self) -> None:
         super().__init__()
         self.data: list[dict] = []
+        self.viewed: dict[str, str] = {}  # 核准只能使用這次開啟播放的版本，不能拿 GX10 的新成片冒充
 
     # ----- 畫面 -----
     def compose(self) -> ComposeResult:
@@ -236,15 +238,19 @@ class VM(App):
         if not r:
             return
         path = jobs.LOCAL / r["name"] / "final.mp4"
-        if r["mac"]:
+        if r["mac"] and not r["gx10"]:
             subprocess.Popen(["open", str(path)])
             return self.say(f"已開啟 {path}")
         if not r["gx10"]:
             return self.say("這支沒有任何來源可以下載", True)
-        self.run_task(
-            f"下載並開啟 {r['topic']}",
-            lambda: (subprocess.Popen(["open", str(jobs.download(r["name"]))]), "")[1],
-        )
+
+        def open_latest():
+            path = jobs.download(r["name"])
+            digest = youtube.video_sha256(path.parent)
+            subprocess.Popen(["open", str(path)])
+            self.call_from_thread(self.viewed.__setitem__, r["name"], digest)
+
+        self.run_task(f"同步並開啟 {r['topic']}", open_latest)
 
     def _review(self, verb: str) -> None:
         r = self.current()
@@ -255,7 +261,11 @@ class VM(App):
         if r["active"] or r["status"] is None:
             return self.say("這支還沒完成（沒有 QC 結果），不能審核", True)
         label = "核准" if verb == "approve" else "標記不通過"
-        go = lambda: self.run_task(f"{label} {r['topic']}", lambda: jobs.remote_cli(verb, r["name"]))
+        digest = self.viewed.get(r["name"])
+        if verb == "approve" and not digest:
+            return self.say("請先按 o 開啟最新成片，看片後再核准", True)
+        args = (verb, r["name"], f"--sha256={digest}") if verb == "approve" else (verb, r["name"])
+        go = lambda: self.run_task(f"{label} {r['topic']}", lambda: jobs.remote_cli(*args))
         if r["status"] == "failed":
             return self.ask(f"這支 QC 沒通過，確定要{label}嗎？", go)
         go()
@@ -278,10 +288,13 @@ class VM(App):
             return self.say("GX10 上沒有這支的成片，無法上傳（上傳在 GX10 執行）", True)
         if r["status"] is None:
             return self.say("這支還沒完成，不能上傳", True)
+        digest = self.viewed.get(r["name"])
+        if r["status"] != "approved" and not digest:
+            return self.say("請先按 o 開啟最新成片，看片後再核准上傳", True)
 
         def up() -> str:
             if r["status"] != "approved":
-                jobs.remote_cli("approve", r["name"])
+                jobs.remote_cli("approve", r["name"], f"--sha256={digest}")
             return jobs.remote_cli("upload", r["name"])
 
         go = lambda: self.run_task(f"上傳 {r['topic']}（私人）", up)
@@ -322,6 +335,22 @@ class VM(App):
 
     def action_token(self) -> None:
         self.run_task("檢查／更新 YouTube token", youtube.renew_token)
+
+    def action_delete_local(self) -> None:
+        r = self.current()
+        if not r:
+            return
+        if not r["mac"]:
+            return self.say("Mac 上沒有這支的下載檔", True)
+        if r["active"]:
+            return self.say("這支可能還在執行中，先不要刪", True)
+        unique = not (r["gx10"] and r["size"])
+        warn = "\n[b][red]這是唯一一份！GX10 沒有成片，刪了就回不來。[/red][/b]" if unique else ""
+        self.ask(
+            f"永久刪除 Mac 上下載的整個作業資料夾（不經垃圾桶）？\n{escape(str(jobs.LOCAL / r['name']))}\n（GX10 與 YouTube 不受影響）{warn}",
+            lambda: self.run_task(f"刪除 Mac 存檔 {r['topic']}", lambda: jobs.delete_local(r["name"])),
+            require="DELETE" if unique else None,
+        )
 
 
 def run() -> None:

@@ -11,6 +11,7 @@ import pytest
 from videomaker import config, jobs, tui
 
 GOOD = ["2026-10-05_feng-ling-qing-xiang", "2026-10-05_xiao-xiong-shua-ya-2", "2026-10-06_a"]
+DIGEST = "a" * 64
 BAD = [
     "../x", "..", "work", "2026-10-05_", "2026-10-05_a b", "2026-10-05_a;rm -rf ~", "2026-10-05_A",
     "2026-10-05_a/../../etc", "2026-10-05_a\n", "2026-10-05_$(id)", "2026-10-05_a--b", "/etc/passwd", "",
@@ -35,6 +36,8 @@ def test_destructive_and_download_calls_reject_bad_names_without_running_anythin
         with pytest.raises(ValueError, match="不合法"):
             jobs.delete_gx10(bad)
         with pytest.raises(ValueError, match="不合法"):
+            jobs.delete_local(bad)
+        with pytest.raises(ValueError, match="不合法"):
             jobs.download(bad)
     with pytest.raises(ValueError, match="不允許"):
         jobs.remote_cli("approve", "2026-10-05_a;rm -rf ~")
@@ -57,6 +60,44 @@ def test_delete_commands_target_exactly_the_named_folder(monkeypatch):
     monkeypatch.setattr(jobs, "_gx", lambda remote, timeout=120: _P(1, err="Permission denied"))
     with pytest.raises(RuntimeError, match="Permission denied"):
         jobs.delete_gx10(GOOD[0])
+
+
+def test_delete_local_removes_only_named_download_and_preserves_symlink_targets(tmp_path, monkeypatch):
+    downloads = tmp_path / "downloads"
+    monkeypatch.setattr(jobs, "LOCAL", downloads)
+    target = downloads / GOOD[0]
+    target.mkdir(parents=True)
+    (target / "final.mp4").write_bytes(b"video")
+    (target / "plan.json").write_text("{}")
+    outside = tmp_path / "gx10-work"
+    outside.mkdir()
+    (outside / "final.mp4").write_bytes(b"original")
+    (target / "external").symlink_to(outside, target_is_directory=True)
+    other = downloads / GOOD[1]
+    other.mkdir()
+    (other / "final.mp4").write_bytes(b"other")
+
+    jobs.delete_local(GOOD[0])
+
+    assert not target.exists()
+    assert (outside / "final.mp4").read_bytes() == b"original"
+    assert (other / "final.mp4").read_bytes() == b"other"
+
+
+def test_delete_local_refuses_symlink_as_job_directory(tmp_path, monkeypatch):
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    monkeypatch.setattr(jobs, "LOCAL", downloads)
+    outside = tmp_path / "original"
+    outside.mkdir()
+    (outside / "final.mp4").write_bytes(b"original")
+    target = downloads / GOOD[0]
+    target.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        jobs.delete_local(GOOD[0])
+
+    assert target.is_symlink() and (outside / "final.mp4").read_bytes() == b"original"
 
 
 def test_inventory_marks_active_and_unfinished_jobs(tmp_path, monkeypatch):
@@ -157,6 +198,8 @@ class Env:
 
     def __init__(self, monkeypatch, rows):
         self.rows, self.calls = rows, []
+        self.viewed = {r["name"]: DIGEST for r in rows} if isinstance(rows, list) else {}
+        monkeypatch.setattr(tui.youtube, "video_sha256", lambda directory: DIGEST)
         monkeypatch.setattr(
             jobs,
             "rows",
@@ -167,6 +210,7 @@ class Env:
             jobs, "download", lambda n: self.calls.append(("download", n)) or Path("/x/final.mp4")
         )
         monkeypatch.setattr(jobs, "delete_gx10", lambda n: self.calls.append(("del_gx10", n)))
+        monkeypatch.setattr(jobs, "delete_local", lambda n: self.calls.append(("del_mac", n)))
         monkeypatch.setattr(tui.youtube, "renew_token", lambda: self.calls.append(("token",)) or "ok")
         monkeypatch.setattr(tui.subprocess, "Popen", lambda cmd: self.calls.append(("open", *cmd)))
 
@@ -176,6 +220,7 @@ def drive(env, *steps):
 
     async def go():
         app = tui.VM()
+        app.viewed = dict(env.viewed)  # 原有審核測試假設使用者已看過片；另測尚未看片的閘門
         async with app.run_test(size=(160, 40)) as pilot:
             await pilot.pause()
             await app.workers.wait_for_complete()
@@ -216,7 +261,7 @@ def test_tui_approve_reject_and_guards(monkeypatch):
     drive(
         env, "a", "down", "a", "down", "a", "x"
     )  # 第 1 筆核准；第 2 筆還在跑 → 擋；第 3 筆 GX10 已沒有 → 擋；x 同樣擋
-    assert env.calls == [("cli", "approve", GOOD[0])]
+    assert env.calls == [("cli", "approve", GOOD[0], f"--sha256={DIGEST}")]
     env.calls.clear()
     drive(env, "x")
     assert env.calls == [("cli", "reject", GOOD[0])]
@@ -227,7 +272,7 @@ def test_tui_failed_qc_needs_confirmation_before_approve(monkeypatch):
     drive(env, "a", "n")
     assert env.calls == []
     drive(env, "a", "y")
-    assert env.calls == [("cli", "approve", GOOD[0])]
+    assert env.calls == [("cli", "approve", GOOD[0], f"--sha256={DIGEST}")]
 
 
 def test_tui_download_open_and_missing_sources(monkeypatch):
@@ -257,7 +302,10 @@ def test_tui_upload_flows(monkeypatch):
     drive(env, "down", "u", "n")  # 未核准：會詢問，取消就什麼都不做
     assert env.calls == []
     drive(env, "down", "u", "y")
-    assert env.calls == [("cli", "approve", GOOD[1]), ("cli", "upload", GOOD[1])]  # 先核准再上傳，順序不能反
+    assert env.calls == [
+        ("cli", "approve", GOOD[1], f"--sha256={DIGEST}"),
+        ("cli", "upload", GOOD[1]),
+    ]  # 先核准再上傳，順序不能反
     env.calls.clear()
     drive(env, "down", "down", "u")
     assert env.calls == []  # 已上傳過的不會重複
@@ -295,6 +343,67 @@ def test_tui_delete_refuses_running_job_and_missing_copy(monkeypatch):
     env = Env(monkeypatch, [_row(GOOD[0], None, active=True), _row(GOOD[1], gx10=False, mac=True)])
     drive(env, "g", "down", "g")  # 進行中不能刪 GX10；GX10 本來就沒有 → 都不動作
     assert env.calls == []
+
+
+def test_tui_delete_local_requires_confirmation_and_refuses_missing_or_active_copy(monkeypatch):
+    env = Env(
+        monkeypatch,
+        [_row(GOOD[0], mac=True), _row(GOOD[1]), _row(GOOD[2], mac=True, active=True)],
+    )
+    drive(env, "m", "n", "m", "escape", "down", "m", "down", "m")
+    assert env.calls == []
+    drive(env, "m", "y")
+    assert env.calls == [("del_mac", GOOD[0])]
+
+
+@pytest.mark.parametrize("gx10,size", [(False, 1048576), (True, 0)])
+def test_tui_delete_local_only_video_requires_typing_DELETE(monkeypatch, gx10, size):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True, gx10=gx10, size=size)])
+    drive(env, "m", "y", "enter")
+    assert env.calls == []
+    drive(env, "m", "D E L E T E", "enter")
+    assert env.calls == [("del_mac", GOOD[0])]
+
+
+def test_tui_delete_local_updates_locations_and_removes_mac_only_row(tmp_path, monkeypatch):
+    real_rows, real_delete = jobs.rows, jobs.delete_local
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True), _row(GOOD[1], mac=True, gx10=False)])
+    monkeypatch.setattr(jobs, "LOCAL", tmp_path)
+    monkeypatch.setattr(jobs, "gx10_jobs", lambda: [env.rows[0]])
+    monkeypatch.setattr(jobs, "rows", real_rows)
+    monkeypatch.setattr(jobs, "delete_local", real_delete)
+    for name in GOOD[:2]:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "final.mp4").write_bytes(b"video")
+
+    app = drive(env, "down", "m", "y", "up", "m", "D E L E T E", "enter")
+
+    assert [r["name"] for r in app.data] == [GOOD[0]]
+    assert app.data[0]["gx10"] and not app.data[0]["mac"]
+    assert not any(tmp_path.iterdir())
+    assert env.calls == []  # 本機刪除與列表更新都不會送出遠端刪除指令
+
+
+def test_tui_delete_local_failure_keeps_row_and_reports_error(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True)])
+
+    def fail(name):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(jobs, "delete_local", fail)
+    messages = []
+    original_say = tui.VM.say
+
+    def capture(app, message, error=False):
+        messages.append((message, error))
+        original_say(app, message, error)
+
+    monkeypatch.setattr(tui.VM, "say", capture)
+    app = drive(env, "m", "y")
+
+    assert app.data[0]["mac"] and not env.calls
+    assert any(error and "Permission denied" in message for message, error in messages)
 
 
 def test_tui_has_no_nas_actions():
@@ -446,3 +555,20 @@ def test_visual_summary_applies_current_threshold_to_saved_results(tmp_path):
     assert result["status"] == "flagged" and result["threshold"] == 0.2  # 舊作業的畫面疑慮也要依新門檻顯示
     only_status = {"visual_qc": {"status": "passed", "threshold": 0.5, "scores": {}}}
     assert jobs.visual_summary(tmp_path / "none", only_status)["status"] == "passed"
+
+
+def test_open_syncs_remote_even_when_local_exists_and_approval_uses_viewed_hash(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True)])
+    env.viewed.clear()
+    app = drive(env, "o", "a")
+    assert app.viewed[GOOD[0]] == DIGEST
+    assert env.calls[0] == ("download", GOOD[0])
+    assert env.calls[1][0] == "open"
+    assert env.calls[2] == ("cli", "approve", GOOD[0], f"--sha256={DIGEST}")
+
+
+def test_tui_requires_opening_video_before_approving_or_approve_and_upload(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0])])
+    env.viewed.clear()
+    drive(env, "a", "u")
+    assert env.calls == []

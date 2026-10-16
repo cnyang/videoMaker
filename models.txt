@@ -8,3 +8,7 @@ Comfy-Org/Wan_2.1_ComfyUI_repackaged/split_files/text_encoders/umt5_xxl_fp8_e4m3
 Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/vae/wan2.2_vae.safetensors vae
 # Ollama 自動視覺 QC（2026-10-15 使用者放行）：clef-flash:9b，Apache-2.0，詳見 LICENSES.md。
 # 由 GX10 的 ollama pull clef-flash:9b 下載，不使用本清單的 ComfyUI 下載腳本。
+# 主題與分鏡企劃（2026-10-16 使用者放行，均已安裝）：qwen3.8:27b（兒童音樂）、gemma4:31b（小知識）。
+# 兩者均為 Apache-2.0，使用 Ollama，不交給本清單的 ComfyUI 下載腳本。
+# 獨立推論（不接影片管線）：nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4，OpenMDW-1.1。
+# 固定 revision 579ffa0b659bc681b89e649fa7c2d5089399602e，由 scripts/deploy_nemotron.py 部署。

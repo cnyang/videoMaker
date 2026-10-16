@@ -90,12 +90,13 @@ videoMaker() {
 | ↑ ↓ | 選擇 | |
 | Enter | 詳情 | 標題、片型、長度、位置、Mac 路徑、YouTube 連結 |
 | `d` | 下載到 Mac | 下載 `final.mp4`、`thumb.jpg` 與企劃／QC JSON 到 `~/Downloads/videoMaker/<作業>/`；GX10 已沒有就無法下載 |
-| `o` | 開啟 | 用預設播放器開啟本機的 `final.mp4`；還沒下載會先下載再開 |
-| `a` | 核准 | 只能核准有 QC 結果的作業；QC 失敗的會再確認一次 |
+| `o` | 開啟 | GX10 仍有成片時，先以 checksum 同步最新檔，再用播放器開啟；只剩 Mac 時直接開啟本機檔 |
+| `a` | 核准 | 先按 `o` 看片，核准會比對觀看版本的 hash；只能核准有 QC 結果的作業，QC 失敗會再確認一次 |
 | `x` | 不通過 | |
 | `u` | 上傳這一支（私人） | 已核准直接上傳；未核准會問你要不要「先核准再上傳」；已上傳過的不會重複上傳 |
 | `U` | 上傳全部已核准 | 先確認支數，全部私人上傳 |
 | `g` | 刪除 GX10 存檔 | 刪掉 `work/<作業>/` 整個資料夾 |
+| `m` | 刪除 Mac 下載檔 | 刪掉 `~/Downloads/videoMaker/<作業>/` 整個資料夾（含成片、縮圖與 JSON） |
 | `T` | token | 檢查 GX10 的 YouTube token，過期就跳視窗、重新授權並自動複製 |
 | `r` | 重新整理 | |
 | `q` | 離開 | |
@@ -103,14 +104,15 @@ videoMaker() {
 **刪除的安全機制**
 
 - 一般刪除：跳出確認視窗，按 `y` 確認、`n` 或 Esc 取消。
-- **唯一一份**（刪 GX10 時 Mac 沒有下載）：視窗會用紅字警告，**必須手動輸入 `DELETE` 再按 Enter 才會刪**，單按 `y` 無效。
+- **唯一一份**（刪 GX10 時 Mac 沒有下載，或刪 Mac 時 GX10 已沒有成片）：視窗會用紅字警告，**必須手動輸入 `DELETE` 再按 Enter 才會刪**，單按 `y` 無效。
 - 還在執行中的作業（沒有 `status.json` 且 10 分鐘內有檔案更新）不能刪除、也不能審核。
 - 作業名稱必須符合 `<日期>_<slug>`（只含小寫英數與連字號），任何含 `/`、`..`、空白、`;`、`$` 等字元的名稱都會被拒絕，**不會送出任何遠端指令**。
-- 刪除 GX10 存檔不會影響已上傳的 YouTube 影片，也不會刪 Mac 的備份；TUI 沒有「刪除 Mac 本機」的功能，請自己在 Finder 刪。
+- `g` 只刪 GX10 存檔，`m` 只刪 Mac 下載檔，都不影響已上傳的 YouTube 影片。刪除不經垃圾桶；Mac 的作業資料夾若是符號連結會拒絕刪除。
 
 **幾件事**
 
-- 上傳、核准在 GX10 執行（token 與成片都在那裡），所以 GX10 上沒有這支作業時 `a`、`x`、`u`、`d`、`g` 都不能用，只能看列表與開啟已下載的 Mac 本機檔。
+- 上傳、核准在 GX10 執行（token 與成片都在那裡），所以 GX10 上沒有這支作業時 `a`、`x`、`u`、`d`、`g` 都不能用，仍可看列表、開啟或用 `m` 刪除已下載的 Mac 本機檔。
+- 核准 hash 記在 `status.json.approved_sha256`；上傳前再次比對成片，內容變更或舊核准沒有 hash 都要重新人工核准。既有狀態不會批次改寫；已上傳的仍回傳原影片 ID。每作業的 `.upload.lock` 保護單支與批次上傳，避免同時觸發而建立兩支影片，請勿手動刪鎖檔。CLI `approve <作業> --sha256=<觀看版本的 hash>` 可明確比對版本；省略時視為核准 GX10 上當下的成片。
 - 想看原始畫面的文字輸出，仍可用 `videoMaker list`（帶參數就是在 GX10 執行該子指令）。
 
 ---
@@ -132,7 +134,7 @@ videoMaker make "主題" [--format short|long|xl] [--stage <階段>] [--images D
 | `--stage` | 「跑到這個階段為止」，已完成的階段會跳過。可選：`plan`、`music`、`keyframes`、`clips`、`mux`、`qc`（預設到 `qc`） |
 | `--images DIR [DIR]` | 照片模式：1 個資料夾 = 用你的照片當關鍵幀；2 個資料夾 = 兩隻狗同框。見[片型與照片模式](#片型與照片模式) |
 | `--dry-run` | 只產 `plan.json`，不呼叫 ComfyUI |
-| `--resume` | 續跑「同主題最近一次」的作業（主題文字要完全相同）。每個階段輸出已存在就跳過，所以重跑本來就不會重做 |
+| `--resume` | 續跑「同主題、同 `--kind`、同 `--format`」建立時間最新的作業；小知識的既有正式標題可離線續跑，別名才需要查維基。每階段輸出已存在就跳過；重合成先產生暫存影片與縮圖，兩者都成功才發布，失敗可重試 |
 
 在 GX10 上手動跑時要帶環境變數（自動排程的 cron 已內建）：
 
@@ -298,7 +300,7 @@ LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消
 - **中文名稱**：取英文條目的中文跨語言連結，再向中文維基要台灣正體（zh-tw）標題（`长颈鹿` → `長頸鹿`），標題與說明欄必須使用它；查不到就不強制。同一晚選主題與產作業用同一份抓取結果（`wiki.fetch` 有快取），來源版本一致。
 - **YouTube 欄位**：標題與說明維持中英雙語；說明欄最後固定附 `Source: Wikipedia, "<條目>" (<永久連結>), CC BY-SA 4.0.`。上傳照舊一律私人、人工核准、標「為兒童打造」。
 - **片型**：只有 short、long（沒有 xl，也不支援照片模式）。
-- **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱，大小寫、單複數等重新導向都可以；`--resume` 會先換成正式標題再找作業）；先用 `--dry-run` 看企劃。`nightly --kind trivia --plan` 帶了不支援的片型（xl）會直接報錯，不會浪費一次重試。
+- **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱，大小寫、單複數等重新導向都可以；`--resume` 先找同內容種類、同片型的既有作業，找不到才解析正式標題）；先用 `--dry-run` 看企劃。`nightly --kind trivia --plan` 帶了不支援的片型（xl）會直接報錯，不會浪費一次重試。
 - **`meta.json` 與 `plan.json`**：`meta.wikipedia` 記條目標題、永久連結、授權；`plan.kind = "trivia"`、`plan.facts`（字幕與 quote）、`plan.sources`。
 - **限制（人工看片不可省）**：quote 驗證保證「引用的原文存在」，詞彙比對擋下「字幕寫了 quote 沒說的事」（實測抓到過 `eat sea urchins`）；但它是啟發式，抓不到把範圍寫成單一數字、省略但書這類改寫，同義詞改寫也會被擋（所以 LLM 必須沿用 quote 的用詞）。中文標題與說明欄只檢查有沒有用維基的中文名稱，內容沒有驗證。字幕與條目仍要人工對照。維基條目會被編輯，永久連結固定在抓取當時的版本。
 
@@ -372,7 +374,9 @@ launchctl bootout gui/$(id -u)/com.videomaker.tokencheck && rm ~/Library/LaunchA
 |---|---|---|
 | `VMK_COMFY_URL` | `http://10.200.200.200:8188` | ComfyUI；在 GX10 上用 `http://127.0.0.1:8188` |
 | `VMK_LLM_URL` | `http://10.200.200.200:11434/v1` | Ollama 的 OpenAI 相容端點；在 GX10 上用 `http://127.0.0.1:11434/v1` |
-| `VMK_LLM_MODEL` | `gpt-oss-20b-128k:latest` | 企劃與主題用的 LLM |
+| `VMK_LLM_MODEL` | 空值（依內容種類） | 手動覆寫分鏡、提示詞與 YouTube 文案的企劃模型；不影響主題模型。通常保持未設定，以免增加模型切換 |
+| `VMK_KIDS_TOPIC_MODEL` | `qwen3.8:27b` | 兒童音樂的主題與分鏡企劃共用模型，手動 `make` 也適用 |
+| `VMK_TRIVIA_TOPIC_MODEL` | `gemma4:31b` | 小知識的主題與分鏡企劃共用模型，手動 `make --kind trivia` 也適用；維基百科來源驗證照常執行 |
 | `VMK_WORK` | `<專案>/work` | 作業資料夾根目錄 |
 | `VMK_MIN_FREE_GB` | `40` | 統一記憶體剩餘低於此值就中止該階段 |
 | `VMK_COOL_TEMP` | `45` | 夜間排程每支開跑前，GPU 要降到此溫度（°C）以下才開始；閒置實測約 36-37°C |
@@ -408,9 +412,11 @@ QC 自動檢查（任一失敗標 `failed`）：解析度 1080×1920、片型長
 
 任一疑慮分數達 20% 就標為有疑慮（2026-10-16 由 50% 降下來：實測身體融合、肢體變成色塊的明顯缺陷畫面只得 38%，50% 會放行）；這是初篩門檻，不是影片有問題的實際機率。2026-10-16 的初步校準（80 張人工標記，其中 3 張有問題）：只有身體融合那張明顯缺陷拿到 38%；另外兩張較細微的（1 張排第 6、1 張排第 60）分數是 12% 與 6%，門檻要降到 5～7% 才抓得到，但會標出 6～9 成的畫面，不可行。所以維持 20%，視覺 QC 只能擋明顯壞掉的畫面，細微缺陷仍靠人工看片；低分隨機樣本（40 張）裡有 1 張有問題，代表低分畫面也有缺陷，偵測器看不到。門檻只影響判定、不影響分數：調整後，TUI 與週五合併對舊作業依已存的分數重新判定（`visual_qc.restate`），但不改 `status.json`、不重設人工審核。Ollama 離線、模型缺少、記憶體不足或回傳無效分數都視為檢查失敗，不能當成通過。檢查前先釋放 ComfyUI 模型並遵守 `VMK_MIN_FREE_GB`，結束後卸載 clef-flash。
 
-逐張結果會原子寫入 `visual_qc.json`；中斷後 `--resume` 沿用已查畫面，已查完的來源不再重新抽幀；素材、取用區段、模型 digest、問題或抽樣設定（取樣率、縮放、品質、提示詞）改變就重查。疑慮門檻不在其中：調整門檻只依已存的分數重算狀態，不重跑 GPU。Ollama 離線等錯誤發生在取得本次指紋之前時，既有結果原樣保留，只標記錯誤。檢查行程被強制中斷時，`visual_qc.json` 會停在 `running`；超過 10 分鐘（`jobs.ACTIVE_SECONDS`）沒有進度，TUI 與盤點改顯示「檢查失敗」。`meta.json` 的 `models.visual_qc` 只在確實有畫面送進模型時才寫入，並附 digest（`clef-flash:9b@<digest>`）。視覺檢查錯誤會讓夜間任務照原規則重試；其他已完成的階段與人工審核不會因此重做。既有作業若要補查，先備份並移走該作業的 `status.json`，再用原主題 `make "主題" --resume`；這會重新等待人工核准，請只對要重新審核的作業操作。
+逐張結果會原子寫入 `visual_qc.json`；中斷後 `--resume` 沿用已查畫面，已查完的來源不再重新抽幀；素材、取用區段、模型 digest、問題或抽樣設定（取樣率、縮放、品質、提示詞）改變就重查。疑慮門檻不在其中：調整門檻只依已存的分數重算狀態，不重跑 GPU。Ollama 離線等錯誤發生在取得本次指紋之前時，既有結果原樣保留，只標記錯誤。檢查行程被強制中斷時，`visual_qc.json` 會停在 `running`；超過 10 分鐘（`jobs.ACTIVE_SECONDS`）沒有進度，TUI 與盤點改顯示「檢查失敗」。`meta.json` 的 `models.visual_qc` 只在確實有畫面送進模型時才寫入，並附 digest（`clef-flash:9b@<digest>`）。視覺檢查錯誤會讓夜間任務照原規則重試；其他已完成的階段與人工審核不會因此重做。既有作業若要補查，先備份並移走該作業的 `status.json`，再用原主題 `make "主題" --resume --kind <原內容種類> --format <原片型>`；這會重新等待人工核准，請只對要重新審核的作業操作。
 
 **校準門檻**：先抽出要人工標記的畫面，再用標記結果決定門檻。
+
+**舊校準資料需重做**：上面的 80 張初步數據使用舊 `fps` 抽幀時間，標記頁面與模型實際評分的畫面可能相差約 0.21 秒，不能用來證明現行門檻的準確度。新抽樣記錄實際選中幀的時間，`sampling=selected-pts-v1` 納入快取指紋；校準工具會略過舊抽樣報告，請在指定作業重新做 QC 後匯出並人工重標。這次更新不會自動重查舊作業或改門檻。
 
 ```bash
 # GX10：抽分數最高的 40 張 + 其餘隨機 40 張，截圖並產生盲標頁面（不顯示分數與作業名稱、順序打亂）
@@ -422,6 +428,8 @@ rsync -a gx10:code/videoMaker/labels/ ~/Downloads/videoMaker-labels/ && open ~/D
 `manifest.json`（編號 → 作業、來源、時間、分數）留在資料夾裡，標記完把 `labels.csv` 放進同一個資料夾，就能對照出各門檻的漏判與誤報。標記存在瀏覽器的 localStorage，關掉再開會接著標。
 
 週五合輯不再跑 GPU，而是彙整各來源的視覺結果；任一來源未檢查、失敗或有疑慮，合輯就不會標為 QC 通過。下載到 Mac 會一併帶回 `visual_qc.json`，刪掉 GX10 存檔後仍可在詳情查看。
+
+合輯的疑慮位置會加上前面來源影片的長度；舊來源缺少長度時只顯示來源內時間，避免指向錯誤的合輯位置。
 
 ---
 
@@ -489,6 +497,29 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 - 設定的 workflow 是 ComfyUI API 格式，放在 `workflows/*.json`；要替換的節點欄位記在 `workflow_map.yaml`。
 - GX10 沒有 git repo（rsync 不帶 `.git`），所以 `meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`。
 
+### Nemotron 獨立部署（不接入產片管線）
+
+2026-10-16 使用者放行 `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`，安排台北時間當日 23:00 由 GX10 的 `at` 執行 `scripts/deploy_nemotron.py`。腳本固定模型 revision 與官方 GB10 nightly 的 ARM64 Docker digest，不修改 Ollama、ComfyUI 或產片模型；未使用額外 drafter。
+
+- `python3 scripts/deploy_nemotron.py --check` 只檢查架構、Docker、磁碟與連接埠，不下載或使用 GPU。
+- 排程全程持有 `/tmp/vmk-nightly.lock`，先下載約 75GB 權重，再準備 GPU；ComfyUI 有佇列、Ollama 有模型常駐、記憶體不足就中止，不停止既有服務。只會釋放閒置 ComfyUI 的模型快取。
+- 推論使用 8K context、單一請求、最多一張圖片、1GiB KV cache、關閉 CUDA graph；啟動期間與推論前後檢查至少 40GiB 可用記憶體，低於門檻即停止。這是基本相容性驗證，不是效能基準。
+- 文字算術與合成藍色圖片都答對才記為 `passed`；結果在 `~/code/nemotron-3.5-super-vl/install-result.json`，完整執行日誌在專案 `log/nemotron-install-20261016.log`。排程最多執行 8 小時。
+- 驗證後停止新建的推論容器以釋放 GPU，保留權重與容器；不自動啟動、不接影片管線。失敗時也保留檔案與容器供查錯。
+
+```bash
+# 檢查排程／部署結果（尚未執行前不會有結果檔）
+ssh gx10 atq
+ssh gx10 'cat ~/code/nemotron-3.5-super-vl/install-result.json'
+ssh gx10 'tail -60 ~/code/videoMaker/log/nemotron-install-20261016.log'
+
+# 成功部署後，確認沒有產片、Ollama 模型或其他 GPU 工作，且有足夠記憶體再手動啟動
+ssh gx10 docker start vmk-nemotron-3-5-super-vl
+# 模型名稱 nemotron-3.5-super-vl；只綁 GX10 的 localhost，需等服務完成載入
+ssh gx10 'curl --fail http://127.0.0.1:8000/v1/models'
+ssh gx10 docker stop vmk-nemotron-3-5-super-vl
+```
+
 ---
 
 ## 疑難排解
@@ -502,7 +533,7 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 | `音樂 3 次都不合格` | 實測 BPM 與設定差超過 5%，或音樂在最後一個切點前就結束（ACE-Step 會提早演完、後面是靜音，程式已多要 10 秒並驗證）。換 seed 重跑 |
 | `plan 重試 3 次仍失敗` | 看日誌的 `企劃第 N 次驗證失敗` 找出被擋的規則；多半是 LLM 反覆寫出高風險字眼或沒有雙語 |
 | 夜間排程沒跑 | `ssh gx10 'crontab -l \| grep videomaker; tail -40 ~/code/videoMaker/log/vmk-nightly.log'`；若有人手動跑 `make`，`flock` 不會擋，但會搶記憶體 |
-| 夜間某支 `failed` | 看 `work/history.jsonl` 的 `error`；修好後 `videoMaker make "<同一個主題>" --resume` 可接續（已完成的階段不會重做，結果需自己 `videoMaker approve` 與上傳） |
+| 夜間某支 `failed` | 看 `work/history.jsonl` 的 `error`；修好後 `videoMaker make "<同一個主題>" --resume --kind <原內容種類> --format <原片型>` 可接續（已完成的階段不會重做，結果需自己 `videoMaker approve` 與上傳） |
 | 想重做某個階段 | 刪掉該階段的輸出檔再 `--resume`（例如刪 `final.mp4` 與 `thumb.jpg` 重新合成；重新合成會刪掉 `status.json`，QC 會重跑） |
 | Mac 的 token 日誌沒有輸出 | `launchctl print gui/$(id -u)/com.videomaker.tokencheck`；沒有就重新安裝 plist |
 
