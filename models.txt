@@ -1,0 +1,10 @@
+# 白名單模型下載清單（給 ~/comfy-get-model.sh -f 用；每行「目標 資料夾」，授權核對見 LICENSES.md）
+# 資料夾一律明確指定：腳本的自動判斷會把 flux1-schnell-fp8 放進 diffusion_models（應為 checkpoints），
+# 只放路線 B（Wan 2.2 TI2V-5B）與關鍵幀、音樂需要的模型；路線 A（14B、Lightning、RIFE）已取消。
+Comfy-Org/ace_step_1.5_ComfyUI_files/checkpoints/ace_step_1.5_turbo_aio.safetensors checkpoints
+Comfy-Org/flux1-schnell/flux1-schnell-fp8.safetensors checkpoints
+Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors diffusion_models
+Comfy-Org/Wan_2.1_ComfyUI_repackaged/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors text_encoders
+Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/vae/wan2.2_vae.safetensors vae
+# Ollama 自動視覺 QC（2026-10-15 使用者放行）：clef-flash:9b，Apache-2.0，詳見 LICENSES.md。
+# 由 GX10 的 ollama pull clef-flash:9b 下載，不使用本清單的 ComfyUI 下載腳本。

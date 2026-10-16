@@ -1,0 +1,137 @@
+# AGENTS.md — videoMaker 專案知識
+
+給 Codex、Copilot、Claude Code 等代理（也給新接手的人）。只寫「讀程式看不出來」的事；程式本身看得出來的不重複。
+操作手冊（產片、審核、cron、YouTube token、排錯）在 [`docs/operations.md`](docs/operations.md)，模型授權在 [`LICENSES.md`](LICENSES.md)。
+
+**一句話**：主題 → LLM 企劃 → ACE-Step 音樂 + 拍點 → FLUX 關鍵幀 → Wan 圖生影片 → ffmpeg 合成 → QC → 人工核准 → 私人上傳 YouTube。
+
+## 硬規則（違反前必須先問使用者）
+
+1. **只用 `LICENSES.md` 白名單內的模型**（ACE-Step 1.5、FLUX.1 schnell、Wan 2.2 TI2V-5B、Qwen-Image-Edit-2509、clef-flash:9b）。換模型／LoRA／節點前先查授權頁，並同步更新 `LICENSES.md`、`models.txt`。禁用清單見 `LICENSES.md`。
+2. **金鑰與 token 不進專案、不進 git、不印到日誌**（`~/.config/videomaker/{client_secret,token}.json`）。hooks 也會擋 `.env`、`secrets.*`，不要繞過。
+3. **上傳一律 `private`，且必須人工核准**（`status.json` 為 `approved`）才能上傳。不要加自動核准、自動公開。token 範圍只有 `youtube.upload`，無法改已上傳影片。
+4. **不要降低 `VMK_MIN_FREE_GB` 硬跑**；記憶體不足就該中止。不要在夜間排程時段（週一到週四 19:30 起）手動跑 GPU 工作。
+5. **不要刪 GX10 上的 `work/`、模型檔、docker 容器**。作業名稱一律過 `jobs.valid()`（只接受 `<日期>_<小寫英數與連字號 slug>`，見 `jobs.JOB_RE`），不可放寬——它擋住路徑穿越與 shell 注入，下載、遠端呼叫與刪除都靠它。
+6. **各階段「輸出已存在就跳過」是可續跑的根基**，改階段邏輯不可破壞（夜間重試與 `--resume` 都依賴它）。
+7. **不要為了驗證去跑真實管線**：一支短片約 35 分鐘、長片 1.5 小時、xl 3 小時，且占用共用 GPU。驗證用 pytest 與 `--dry-run`。
+
+## 環境
+
+| 機器 | 角色 | 注意 |
+|---|---|---|
+| Mac（開發機） | 開發、TUI、YouTube 授權、token LaunchAgent | 用 `uv`；專案在 `/Users/cnyang/code/temp/videoMaker` |
+| GX10（`ssh gx10`，10.200.200.200） | ComfyUI、Ollama、所有 GPU 生成、cron、實際上傳 | **用 pip 的 venv（不是 uv）、沒有 git、沒有 Textual**；新增依賴要手動 `pip install`；專案在 `/home/ehomeservice/code/videoMaker` |
+
+- 代理多半只在 Mac 上，且可能連不到 GX10：能做改碼、pytest、ruff；不能做 GPU 階段、`make`（非 dry-run）、`nightly`。`--dry-run` 仍需連得到 LLM（`VMK_LLM_URL` 預設指向 GX10）。
+- `videoMaker` 是 Mac `~/.zshrc` 的 shell 函式，**不在 repo、代理的 shell 沒有它**；文件中的 `videoMaker xxx` = 在 GX10 執行 `cd ~/code/videoMaker && .venv/bin/python -m videomaker xxx`。
+- 所有設定走環境變數（`videomaker/config.py`，清單在 operations.md#環境變數）；在 GX10 手動跑要帶 `VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1`。
+
+## 指令
+
+```bash
+uv sync                                                                    # 安裝（Python 3.12）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-15）：ruff 乾淨、226 passed（約 25 秒）
+uv run python -m videomaker --help
+uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
+```
+
+部署到 GX10（rsync，不帶 venv／work／照片）與 GX10 端驗證指令見 operations.md#部署與開發。
+工具鏈只有 **ruff（lint + format，line-length 110）+ pytest**；沒有 mypy／black／isort 設定，不要順手加。
+
+## 模組地圖
+
+```
+videomaker/
+  __main__.py   argparse CLI 入口；所有子指令在此分派（--format 的 choices 是寫死的）
+  config.py     環境變數 → 常數（ROOT、COMFY_URL、LLM_URL、LLM_MODEL、WORK、MIN_FREE_GB、STEPS、COOL_TEMP、DEFAULT_BPM）
+  plan.py       Plan／Shot／Music（pydantic）、企劃內容規則（regex）、FORMATS、shot_math、build_layout、make_plan（呼叫 LLM，驗證失敗最多重寫 3 次）
+  pipeline.py   Job、new_job、各階段 music／keyframes／clips／mux／qc、照片模式（_use_photos）、run、bench
+  comfy.py      ComfyUI client（/prompt→輪詢 /history→/view）、fill()（依 workflow_map.yaml 填值）、記憶體檢查、models_in()、missing_models()
+  audio.py      librosa 拍點偵測、切點、frame_bounds
+  visual_qc.py  clef-flash 視覺抽樣（2fps）；逐張原子保存、素材與模型 digest 失效檢查、合輯結果彙整
+  nightly.py    夜間排程：LLM 想主題、預估耗時 vs deadline、GPU 降溫等待、失敗重試一次、寫 history.jsonl
+  weekly.py     週五合併：用 ffmpeg -c copy 把週一到四的同片型串成一支
+  youtube.py    OAuth、可續傳上傳（冪等）、核准閘門、listing、token 健康檢查與 renew_token
+  jobs.py       作業盤點（GX10 端 inventory）＋ Mac 端 ssh／rsync 操作（下載、remote_cli、刪除）
+  tui.py        Textual 介面（只在 Mac 跑）；只管畫面，遠端動作與名稱檢查都在 jobs.py
+workflows/*.json     ComfyUI API 格式 workflow；workflow_map.yaml 記錄要替換的「節點 ID → 輸入名」
+tests/               test_pipeline.py（plan／audio／comfy／pipeline／nightly／youtube 的大雜燴）、test_tui.py、test_weekly.py
+```
+
+## 作業資料夾 = 狀態機
+
+作業的狀態**完全由 `work/<日期>_<slug>/` 內的檔案決定**，沒有資料庫：
+
+```
+plan.json + meta.json 存在      → 作業存在
+無 status.json                  → 未完成／進行中（10 分鐘內有檔案更新視為進行中，jobs.ACTIVE_SECONDS）
+status.json.status              → pending_review → approved | rejected；QC 沒過是 failed
+meta.json.youtube_id            → 已上傳（upload 靠它做冪等）
+meta.json.images                → 照片模式
+work/history.jsonl              → 夜間排程每支的結果；weekly 靠它找本週作業
+```
+
+重做某階段：刪該階段輸出再 `--resume`。`mux` 會刪掉 `status.json`，所以重合成後 QC 一定重跑。
+`meta.json` 是授權證據（模型檔名、seed、完整提示詞、BPM、切點、耗時、git hash），別省略欄位。
+
+## 設計決定與陷阱
+
+**企劃（plan.py）**
+- 內容規則（純英文、禁文字類字眼、禁高風險字眼、道具顏色固定、禁現有角色／品牌、簡體字偵測、雙語 YouTube 欄位）是**為了降低 FLUX／Wan 畫壞的機率**，規則表與原因在 operations.md#企劃內容規則。改規則要三處同步：regex、`_SYSTEM` 提示詞、測試。
+- **`style` 為空 = 照片模式**：`Plan._content_rules` 在 `style` 為空時整組跳過（提示詞來自使用者的照片描述）；`full_prompt()` 也靠它略過空欄位。
+- BPM 由程式決定（預設 120，允許 100–140），LLM 只是附和；鏡頭數也由 `shot_math` 算好告訴 LLM。
+- `Plan.seed` 由程式產生；每鏡 seed = 基底 + 鏡頭 id（關鍵幀黑邊重生再加 `1000 * attempt`）。
+
+**音樂與拍點（pipeline.music、audio.py）**
+- **ACE-Step 會提早演完**（要 22 秒只演約 16 秒，後面是靜音），所以多要 10 秒、重試每次再加 4 秒，並在 `audio.analyze` 驗證「有聲音的結尾 ≥ 最後一個切點」。別把「檔案夠長」當作「音樂夠長」。
+- 切點是**偵測到的拍點**，不是理論網格；重拍用「前 4 拍的 RMS 能量最大者」的啟發式（程式內有 `ponytail:` 註解，錯一拍時切點仍在拍上）。實測 BPM 與設定差 >5% 就重生。
+- `frame_bounds` 用累積四捨五入，每個切點誤差 ≤ 0.5 幀。
+
+**影片（Wan 2.2 TI2V-5B）**
+- 解析度只能 **704×1280**，幀數必須是 **4n+1**（`LENGTH = 121`，24fps ≈ 5.04 秒），不補幀；`mux` 時才放大裁切到 1080×1920。
+- 每個 GPU 階段開始前 `Comfy.prepare()` = **先 `/free` 再檢查記憶體**（順序不可反，否則被自己上一階段擋住）；階段結束再 `free()`。
+- 長片／xl 重複使用鏡頭：判斷用 **`n_unique < n_slots`**，不要寫死片型名稱（`new_job` 有註解）；重複同一鏡頭時換起點幀（`REUSE_OFFSETS`）。
+- 照片模式加的負向提示詞 `PHOTO_NEG` **含簡體字是刻意的**（Wan 官方負向提示詞就是簡體中文，workflow 裡的預設 `neg` 也是），不要被簡繁檢查「修正」——`SIMPLIFIED` 只套用在 YouTube 欄位與夜間主題。正向用 `only the dogs are in the scene` 而不寫否定句（Wan 對 "no hands" 反而容易畫出手）。
+- 關鍵幀有黑邊（`_has_black_bars`）會換 seed 重生最多 3 次，3 次後**不會報錯**而是沿用最後一張。
+
+**CLI 與遠端介面**
+- **部分子指令的 stdout 是機器介面**：`jobs-json`（TUI 用 `json.loads`）、`token-status`（`remote_status` 取最後一行 `ok／expired／missing`）、`upload`（印影片 ID）。這些指令不要多印東西；人看的訊息走 `logging`（stderr）。
+- `tui` 是**延遲載入**（`__main__` 內 `from .tui import run`），因為 GX10 沒裝 Textual，夜間 cron 不能因此壞掉。其他頂層 import 也不要引入 GX10 沒有的套件。
+- TUI 在 GX10 上執行子指令（核准、不通過、上傳）一律經 `jobs.remote_cli`，它有**參數白名單**（`approve／reject／upload／upload-approved`、`-` 開頭選項、合法作業名）。新增 TUI 會遠端呼叫的子指令要加進去。
+- 週五合併產生的作業名是 `<日期>_weekly-<片型>`，同樣符合 `jobs.valid()`；`plan.json` 沿用第一支的 Plan 只換主題與 YouTube 文案，所以走原本的上傳流程。串接用 `-c copy`，靠各支都由同一條 `mux` 產生（編碼參數一致）。
+
+**夜間排程（nightly.py）**
+- 預估耗時 = 獨特鏡頭數 × `SEC_PER_STEP`(17.3) × `STEPS` + 其他階段，×1.15；「現在 + 預估」超過 deadline 就略過該支，不硬跑。每支（含重試）開跑前 `wait_cool`。
+- `flock` 只保護夜間任務；手動 `make` 不受保護，會搶統一記憶體。
+
+## 修改指南
+
+| 想做 | 改哪裡 |
+|---|---|
+| 新片型 | `plan.FORMATS`；`__main__` 的 `--format` choices（寫死）；`nightly.NIGHT`／`estimate`；`weekly` 會自動走 `FORMATS`；補測試 |
+| 換／加 ComfyUI workflow | 以 **API 格式**匯出到 `workflows/`；`workflow_map.yaml` 加欄位對應；`LICENSES.md`、`models.txt`；`videoMaker check` 驗證；`test_workflow_node_refs_exist`／`test_workflows_match_live_object_info`（ComfyUI 連不上會 skip）會檢查對應 |
+| 新子指令 | `__main__.build_parser` + `main`；若 TUI 要遠端呼叫，加進 `jobs.remote_cli` 白名單 |
+| 新環境變數 | `config.py` + operations.md#環境變數 |
+| 新企劃規則 | `plan.py` regex／驗證 + `_SYSTEM` + 測試（規則表更新到 operations.md） |
+
+## 測試
+
+- 全是不需要 GPU／ComfyUI 的單元測試（以 fake／monkeypatch 取代 ComfyUI、LLM、YouTube、ssh）；唯一的連線測試 `test_workflows_match_live_object_info` 連不上會 skip。TUI 用 Textual pilot。
+- 新測試放進對應的既有檔案；`test_pipeline.py` 目前涵蓋範圍很廣。
+- **測試失敗時修實作，不要改測試**（除非測試本身有錯）。偏好 TDD；覆蓋率目標 80%。同一個失敗最多修 3 次，仍失敗就停下來問使用者。
+
+## 工作慣例（使用者偏好）
+
+- 程式碼的關鍵邏輯註解與文件用**繁體中文（台灣用語）**，沿用現有風格；技術名詞與識別字維持英文。
+- 改完程式要跑 ruff + pytest，宣告完成前**貼出實際輸出**；跳過任何步驟要明說。
+- **commit 前先讓使用者確認內容**。格式 `<type>: <description>`（feat／fix／refactor／docs／test／chore／perf／ci）；不加 `Co-Authored-By` 等 attribution 行。
+- 專案目前**還沒有任何 commit**（2026-10-15）。`photo/`（私人照片）與 `.DS_Store` 已在 `.gitignore`，不要 `git add -f`。
+
+## 已知問題與待辦
+
+- 視覺 QC 是 clef-flash 每秒 2 張的初篩，50% 門檻未經校準，短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
+- Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
+- 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。
+- `LICENSES.md` 的企劃 LLM（`gpt-oss-20b-128k` 自訂 tag）授權尚未核對底層模型。
+- `models.txt` 檔頭註解仍提到 `comfy-get-model.sh`，實際下載用 `scripts/download.sh`。
+- `kids-shorts-pipeline-spec.md` 是 Phase 1 的歷史規格：路線 A（14B／RIFE／Lightning）、NAS 存放、`--route` 旗標都已不存在；現況以本檔與 operations.md 為準，其中 §2 硬性限制、§7、§11 的規則仍有效。

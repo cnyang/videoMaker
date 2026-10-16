@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+work/
+*.egg-info/
+.env
+
+# 憑證與 token 絕不進 git／不同步到其他機器
+client_secret*.json
+token*.json
+*.pem
+
+# GX10 上的 cron／下載日誌
+log/
+
+# macOS 雜檔、本機私人照片（照片模式用，不進 git；部署 GX10 的 rsync 也已排除）
+.DS_Store
+photo/

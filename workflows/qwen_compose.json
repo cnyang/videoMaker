@@ -1,0 +1,157 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "img1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    }
+  },
+  "img2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    }
+  },
+  "pos": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "",
+      "vae": [
+        "vae",
+        0
+      ],
+      "image1": [
+        "img1",
+        0
+      ],
+      "image2": [
+        "img2",
+        0
+      ]
+    }
+  },
+  "neg": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "",
+      "vae": [
+        "vae",
+        0
+      ],
+      "image1": [
+        "img1",
+        0
+      ],
+      "image2": [
+        "img2",
+        0
+      ]
+    }
+  },
+  "shift": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "shift": 3
+    }
+  },
+  "norm": {
+    "class_type": "CFGNorm",
+    "inputs": {
+      "model": [
+        "shift",
+        0
+      ],
+      "strength": 1
+    }
+  },
+  "latent": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 704,
+      "height": 1280,
+      "batch_size": 1
+    }
+  },
+  "ks": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "norm",
+        0
+      ],
+      "seed": 0,
+      "steps": 20,
+      "cfg": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "pos",
+        0
+      ],
+      "negative": [
+        "neg",
+        0
+      ],
+      "latent_image": [
+        "latent",
+        0
+      ],
+      "denoise": 1
+    }
+  },
+  "dec": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "ks",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    }
+  },
+  "save": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "videomaker/compose",
+      "images": [
+        "dec",
+        0
+      ]
+    }
+  }
+}

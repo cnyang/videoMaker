@@ -1,0 +1,28 @@
+[project]
+name = "videomaker"
+version = "0.1.0"
+description = "兒童音樂 Shorts 自動生成管線（Phase 1）"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pydantic>=2",
+    "requests",
+    "pyyaml",
+    "librosa",
+    "numpy",
+    "google-api-python-client>=2.201.0",
+    "google-auth-oauthlib>=1.5.0",
+    "textual>=8.2.8",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools]
+packages = ["videomaker"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

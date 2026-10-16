@@ -1,0 +1,1764 @@
+import itertools
+import json
+import subprocess
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from videomaker import audio, config, pipeline, visual_qc
+from videomaker.comfy import fill, models_in
+from videomaker.plan import Plan, shot_math
+
+SR = 22050
+
+
+def click_track(path, bpm, offset, secs):
+    """合成節拍：每拍一個短 click，每 4 拍（重拍）加重音量與低頻。"""
+    t_all = np.arange(int(secs * SR)) / SR
+    y = (0.05 * np.sin(2 * np.pi * 220 * t_all) + 0.05 * np.sin(2 * np.pi * 330 * t_all)).astype(
+        np.float32
+    )  # 持續音墊，避免峰值因數過大
+    period = 60 / bpm
+    for i in range(int((secs - offset) / period)):
+        s = int((offset + i * period) * SR)
+        n = int(0.05 * SR)
+        t = np.arange(n) / SR
+        amp, f = (1.0, 200) if i % 4 == 0 else (0.35, 1000)
+        y[s : s + n] += (amp * np.sin(2 * np.pi * f * t) * np.exp(-t * 60)).astype(np.float32)
+    sf.write(path, y, SR)
+
+
+@pytest.mark.parametrize("bpm", range(100, 141))
+def test_shot_math_bounds(bpm):
+    shot, n, total = shot_math(bpm)
+    assert shot <= 5.0 and 15 <= total <= 20 and n >= 4
+
+
+def test_shot_math_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        shot_math(80)
+
+
+def test_plan_rejects_banned_and_bad_bpm():
+    ok = {
+        "topic": "t",
+        "slug": "bear-brush",
+        "style": "flat 2D",
+        "character": "a round brown bear cub with a red scarf",
+        "shots": [{"id": 1, "prompt": "bear waves"}],
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+    }
+    Plan.model_validate(ok)
+    for bad in (
+        {**ok, "style": "in the style of Pixar"},
+        {**ok, "shots": [{"id": 1, "prompt": "Mickey runs"}]},
+        {**ok, "music": {**ok["music"], "bpm": 90}},
+        {**ok, "slug": "Bad Slug"},
+    ):
+        with pytest.raises(ValueError):
+            Plan.model_validate(bad)
+
+
+def test_plan_rejects_chinese_short_character_and_text_words():
+    base = {
+        "topic": "t",
+        "slug": "bear-brush",
+        "style": "flat 2D cartoon",
+        "character": "a round brown bear cub with a red scarf",
+        "shots": [{"id": 1, "prompt": "the bear waves"}],
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+    }
+    Plan.model_validate(base)
+    for bad in (
+        {**base, "character": "小熊"},  # 中文 → FLUX 會畫出亂碼文字
+        {**base, "character": "a bear"},  # 太短 → 無法跨鏡維持角色一致
+        {**base, "style": "扁平卡通"},
+        {**base, "shots": [{"id": 1, "prompt": "小熊 waves"}]},
+        {**base, "shots": [{"id": 1, "prompt": "the bear holds a sign with letters"}]},
+    ):
+        with pytest.raises(ValueError):
+            Plan.model_validate(bad)
+
+
+def test_full_prompt_prefixes_style_and_character():
+    p = Plan.model_validate(
+        {
+            "topic": "t",
+            "slug": "a",
+            "style": "S",
+            "character": "a round brown bear cub with a red scarf",
+            "shots": [{"id": 1, "prompt": "P"}],
+            "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        }
+    )
+    assert p.full_prompt(p.shots[0]) == "S, a round brown bear cub with a red scarf, P"
+
+
+def test_fill_and_models():
+    wf = fill(
+        "music",
+        tags="t",
+        lyrics="[Instrumental]",
+        seed=7,
+        bpm=120,
+        key="C major",
+        timesignature="4",
+        duration=22.0,
+    )
+    assert wf["enc"]["inputs"]["seed"] == wf["ks"]["inputs"]["seed"] == 7
+    assert wf["latent"]["inputs"]["seconds"] == 22.0
+    with pytest.raises(KeyError):
+        fill("music", nope=1)
+    assert models_in(fill("clip", prompt="p", image="i", seed=1, width=704, height=1280, length=121)) == [
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "wan2.2_ti2v_5B_fp16.safetensors",
+        "wan2.2_vae.safetensors",
+    ]
+
+
+def test_workflow_node_refs_exist():
+    """每個 workflow 的 [節點, 輸出] 參照都指到存在的節點。"""
+    for spec in __import__("yaml").safe_load((config.ROOT / "workflow_map.yaml").read_text()).values():
+        wf = json.loads((config.ROOT / spec["file"]).read_text())
+        for node in wf.values():
+            for v in node["inputs"].values():
+                if isinstance(v, list):
+                    assert v[0] in wf
+        for targets in spec["fields"].values():
+            for node, field in targets:
+                assert field in wf[node]["inputs"]
+
+
+def test_beats_offset_and_cuts(tmp_path):
+    click_track(tmp_path / "m.wav", 120, offset=0.37, secs=22)
+    info = audio.analyze(tmp_path / "m.wav", 120, 5)
+    assert abs(info["bpm_measured"] - 120) < 3
+    assert abs(info["t0"] - 0.37) < 0.03  # 音樂起點對齊第一個重拍（不是 0 秒）
+    gaps = np.diff(info["cuts"])
+    assert len(gaps) == 5 and all(abs(g - 4.0) < 0.1 for g in gaps)
+
+
+def test_beats_too_short_raises(tmp_path):
+    click_track(tmp_path / "m.wav", 120, offset=0.0, secs=12)
+    with pytest.raises(ValueError):
+        audio.analyze(tmp_path / "m.wav", 120, 5)
+
+
+def test_beats_music_ends_before_last_cut_raises(tmp_path):
+    """檔案夠長但後段是靜音（ACE-Step 實際會這樣）：必須判為不合格，不能默默產出無聲的最後一鏡。"""
+    click_track(tmp_path / "m.wav", 120, offset=0.0, secs=28)
+    y, sr = sf.read(tmp_path / "m.wav")
+    y[int(15 * sr) :] = 0
+    sf.write(tmp_path / "m.wav", y, sr)
+    with pytest.raises(ValueError, match="結束了"):
+        audio.analyze(tmp_path / "m.wav", 120, 5)
+
+
+def test_frame_bounds_error_under_one_frame():
+    cuts = [0.37 + 3.7 * i for i in range(6)]
+    for fps in (24, 30):
+        b = audio.frame_bounds(cuts, fps)
+        assert all(abs(x / fps - (c - cuts[0])) <= 0.5 / fps + 1e-9 for x, c in zip(b, cuts, strict=True))
+
+
+def _ff(*a):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *map(str, a)], check=True)
+
+
+def test_mux_qc_end_to_end(tmp_path, monkeypatch):
+    size, fps = "704x1280", 24
+    """用 ffmpeg 合成的假素材跑 mux → qc：1080x1920、15–20.5 秒、有音軌、響度合格。"""
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(visual_qc, "check", lambda job: {"status": "passed"})
+    d = tmp_path / "2026-01-01_t"
+    (d / "clips").mkdir(parents=True)
+    plan = {
+        "topic": "t",
+        "slug": "t",
+        "style": "s",
+        "character": "a round brown bear cub with a red scarf",
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        "shots": [{"id": i, "prompt": "p"} for i in range(1, 6)],
+    }
+    (d / "plan.json").write_text(json.dumps(plan))
+    (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}}))
+    for i, color in enumerate(["red", "green", "blue", "yellow", "purple"], 1):
+        _ff(
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={color}:s={size}:r={fps}:d=5.05",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            d / "clips" / f"{i:02d}.mp4",
+        )
+    click_track(d / "music.wav", 120, offset=0.37, secs=22)
+    info = audio.analyze(d / "music.wav", 120, 5)
+    (d / "beats.json").write_text(json.dumps(info))
+    job = pipeline.Job(d)
+    pipeline.mux(job)
+    pipeline.qc(job)
+    status = json.loads((d / "status.json").read_text())
+    assert status["status"] == "pending_review", status
+    assert (d / "thumb.jpg").exists() and not (d / "audio_trim.wav").exists()
+    assert "qc" in job.meta["timings"]  # QC 也要計時，bench 才有這欄
+    sr = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate",
+            "-of",
+            "csv=p=0",
+            d / "final.mp4",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert sr == "48000"  # loudnorm 會把取樣率拉到 192k，不指定的話成片會變 96kHz
+    # 再跑一次不會重做（輸出已存在就跳過）
+    mtime = (d / "final.mp4").stat().st_mtime_ns
+    pipeline.mux(job)
+    assert (d / "final.mp4").stat().st_mtime_ns == mtime
+
+
+def test_workflows_match_live_object_info():
+    """對照實際 ComfyUI 的 /object_info：節點存在、輸入名稱正確、必填輸入齊全（連不上就跳過）。"""
+    import requests
+
+    try:
+        info = requests.get(f"{config.COMFY_URL}/object_info", timeout=15).json()
+    except requests.RequestException:
+        pytest.skip("ComfyUI 連不上")
+    for f in sorted((config.ROOT / "workflows").glob("*.json")):
+        for nid, node in json.loads(f.read_text()).items():
+            spec = info[node["class_type"]]["input"]
+            known = set(spec["required"]) | set(spec.get("optional", {}))
+            given = set(node["inputs"])
+            assert given <= known, f"{f.name}:{nid} 未知輸入 {given - known}"
+            assert set(spec["required"]) <= given, f"{f.name}:{nid} 缺必填 {set(spec['required']) - given}"
+
+
+def test_missing_models_detects_absent_and_old_option_format():
+    from videomaker.comfy import LOADERS, missing_models
+
+    def info_with(present):  # 新格式 ["COMBO", {"options": [...]}] 與舊格式 [[...]] 都要能讀
+        out = {}
+        for cls, field in LOADERS.items():
+            opts = sorted(present)
+            out[cls] = {
+                "input": {"required": {field: ["COMBO", {"options": opts}] if cls != "VAELoader" else [opts]}}
+            }
+        return out
+
+    all_names = {
+        n
+        for spec in __import__("yaml").safe_load((config.ROOT / "workflow_map.yaml").read_text()).values()
+        for n in models_in(json.loads((config.ROOT / spec["file"]).read_text()))
+    }
+    assert missing_models(info_with(all_names)) == []
+    miss = missing_models(info_with(all_names - {"wan2.2_vae.safetensors", "flux1-schnell-fp8.safetensors"}))
+    assert {f for _, f in miss} == {"wan2.2_vae.safetensors", "flux1-schnell-fp8.safetensors"}
+
+
+def _photo_job(tmp_path, monkeypatch, n_photos, with_txt=True):
+    """照片模式：用 ffmpeg 合成的假狗照跑 _use_photos + keyframes（不碰 ComfyUI）。"""
+    from videomaker.plan import Shot
+
+    monkeypatch.setattr(config, "WORK", tmp_path / "work")
+    src = tmp_path / "dogs"
+    src.mkdir()
+    for i in range(n_photos):
+        _ff("-f", "lavfi", "-i", "color=c=orange:s=1080x1920:d=1", "-frames:v", 1, src / f"dog{i + 1}.jpg")
+        if with_txt and i == 0:
+            (src / "dog1.txt").write_text("a golden retriever sitting on grass\n")
+    plan = Plan.model_validate(
+        {
+            "topic": "t",
+            "slug": "t",
+            "style": "S",
+            "character": "a round brown bear cub with a red scarf",
+            "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+            "shots": [{"id": i, "prompt": "p"} for i in range(1, 6)],
+        }
+    )
+    assert all(isinstance(s, Shot) for s in plan.shots)
+    d = tmp_path / "job"
+    d.mkdir()
+    return plan, src, d
+
+
+def test_photo_mode_assigns_photos_and_clears_style(tmp_path, monkeypatch):
+    plan, src, d = _photo_job(tmp_path, monkeypatch, n_photos=2)
+    used = pipeline._use_photos(plan, [src], d)
+    assert [u["files"][0] for u in used] == [
+        "dog1.jpg",
+        "dog2.jpg",
+        "dog1.jpg",
+        "dog2.jpg",
+        "dog1.jpg",
+    ]  # 照片不夠 → 輪流
+    assert plan.shots[0].prompt.startswith("a golden retriever sitting on grass. the dog bobs")
+    assert plan.shots[1].prompt.startswith("a dog. ")  # 沒有 .txt → 預設描述
+    assert (
+        plan.full_prompt(plan.shots[0]) == plan.shots[0].prompt
+    )  # style/character 已清空，前面不會有 ", , "
+    assert len(used[0]["sha256"][0]) == 64 and (d / "source" / "05_a.jpg").exists()
+
+
+def test_photo_mode_empty_dir_raises(tmp_path, monkeypatch):
+    plan, _, d = _photo_job(tmp_path, monkeypatch, n_photos=1)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="沒有圖片"):
+        pipeline._use_photos(plan, [empty], d)
+
+
+def test_photo_mode_keyframes_resized_without_comfy(tmp_path, monkeypatch):
+    size = (704, 1280)
+    plan, src, d = _photo_job(tmp_path, monkeypatch, n_photos=5)
+    used = pipeline._use_photos(plan, [src], d)
+    (d / "plan.json").write_text(plan.model_dump_json())
+    (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}, "images": used}))
+    job = pipeline.Job(d)
+    pipeline.keyframes(job)  # 若誤呼叫 ComfyUI 會因連不上而失敗
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            d / "keyframes" / "03.png",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert out == f"{size[0]}x{size[1]}"
+    assert job.meta["shots"]["3"]["source"].startswith("03_a.")
+    mtime = (d / "keyframes" / "03.png").stat().st_mtime_ns
+    pipeline.keyframes(job)  # 已存在就跳過
+    assert (d / "keyframes" / "03.png").stat().st_mtime_ns == mtime
+
+
+def test_two_dogs_prompts_and_sources(tmp_path, monkeypatch):
+    plan, a, d = _photo_job(tmp_path, monkeypatch, n_photos=2)
+    b = tmp_path / "dogsB"
+    b.mkdir()
+    _ff("-f", "lavfi", "-i", "color=c=white:s=1080x1920:d=1", "-frames:v", 1, b / "b1.jpg")
+    (b / "b1.txt").write_text("a small white fluffy dog")
+    used = pipeline._use_photos(plan, [a, b], d)
+    assert used[0]["desc"] == ["a golden retriever sitting on grass", "a small white fluffy dog"]
+    assert used[1]["files"] == ["dog2.jpg", "b1.jpg"] and used[2]["files"] == [
+        "dog1.jpg",
+        "b1.jpg",
+    ]  # A 輪流、B 只有一張就重複
+    assert len({u["scene"] for u in used}) == 5  # 每鏡不同場景
+    assert plan.shots[0].prompt.startswith(
+        "a golden retriever sitting on grass and a small white fluffy dog, sitting side by side on a sunny"
+    )
+    assert "both dogs bob" in plan.shots[0].prompt
+    assert (d / "source" / "03_a.jpg").exists() and (d / "source" / "03_b.jpg").exists()
+    with pytest.raises(ValueError, match="1 個資料夾"):
+        pipeline._use_photos(plan, [a, b, b], d)
+
+
+def test_two_dogs_keyframes_call_compose_workflow(tmp_path, monkeypatch):
+    """兩隻狗：keyframes 走 compose workflow（假 Comfy 取代 ComfyUI），輸出尺寸與 prompt 正確。"""
+    calls = []
+
+    class FakeComfy:
+        def prepare(self): ...
+        def free(self): ...
+        def upload(self, path, name):
+            return name
+
+        def run(self, wf, dest, timeout):
+            calls.append(wf)
+            _ff(
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=green:s={wf['latent']['inputs']['width']}x{wf['latent']['inputs']['height']}:d=1",
+                "-frames:v",
+                1,
+                dest,
+            )
+            return dest
+
+    monkeypatch.setattr(pipeline, "Comfy", FakeComfy)
+    plan, a, d = _photo_job(tmp_path, monkeypatch, n_photos=2)
+    b = tmp_path / "dogsB"
+    b.mkdir()
+    _ff("-f", "lavfi", "-i", "color=c=white:s=1080x1920:d=1", "-frames:v", 1, b / "b1.jpg")
+    used = pipeline._use_photos(plan, [a, b], d)
+    (d / "plan.json").write_text(plan.model_dump_json())
+    (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}, "images": used}))
+    job = pipeline.Job(d)
+    pipeline.keyframes(job)
+    assert len(calls) == 5
+    inp = calls[0]
+    assert (inp["latent"]["inputs"]["width"], inp["latent"]["inputs"]["height"]) == (704, 1280)
+    assert (
+        "image 1" in inp["pos"]["inputs"]["prompt"] and "sunny green lawn" in inp["pos"]["inputs"]["prompt"]
+    )
+    assert inp["img1"]["inputs"]["image"].endswith("01_a.jpg") and inp["img2"]["inputs"]["image"].endswith(
+        "01_b.jpg"
+    )
+    assert "qwen_image_edit_2509_fp8_e4m3fn.safetensors" in job.meta["models"]["keyframes"]
+    assert job.meta["shots"]["2"]["compose_seed"] == plan.seed + 2
+    pipeline.keyframes(job)  # 已存在就跳過，不會再呼叫
+    assert len(calls) == 5
+
+
+def test_prepare_frees_before_checking_memory(monkeypatch):
+    """先 /free 再量記憶體：模擬 /free 之後記憶體才慢慢回來（舊順序會直接中止）。"""
+    from videomaker.comfy import Comfy, ComfyError
+
+    events = []
+
+    class R:
+        def __init__(self, data):
+            self.data, self.ok = data, True
+
+        def json(self):
+            return self.data
+
+    c = Comfy("http://x")
+    free_gb = iter([10, 10, 80])  # /free 後第三次量測才夠
+
+    def fake_req(method, path, **kw):
+        events.append(path)
+        if path == "/system_stats":
+            return R({"system": {"ram_free": next(free_gb) * 2**30}})
+        return R({})
+
+    monkeypatch.setattr(c, "_req", fake_req)
+    monkeypatch.setattr("videomaker.comfy.time.sleep", lambda s: None)
+    c.prepare()
+    assert events[0] == "/free" and events.count("/system_stats") == 3
+    monkeypatch.setattr(
+        c,
+        "_req",
+        lambda m, p, **kw: R({"system": {"ram_free": 5 * 2**30}}) if p == "/system_stats" else R({}),
+    )
+    monkeypatch.setattr("videomaker.comfy.time.monotonic", iter(range(0, 1000, 20)).__next__)
+    with pytest.raises(ComfyError, match="中止"):
+        c.prepare()
+
+
+def test_plan_roundtrip_with_empty_style_and_character(tmp_path):
+    """照片模式把 style/character 清空後存成 plan.json，重新載入必須成功（Job 每階段都會重新載入）。"""
+    plan = Plan.model_validate(
+        {
+            "topic": "t",
+            "slug": "a",
+            "style": "S",
+            "character": "a round brown bear cub with a red scarf",
+            "shots": [{"id": 1, "prompt": "p"}],
+            "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        }
+    )
+    plan.style = plan.character = ""
+    again = Plan.model_validate_json(plan.model_dump_json())
+    assert again.character == "" and again.full_prompt(again.shots[0]) == "p"
+
+
+def _png(path, w=704, h=1280, bars=0):
+    vf = f"pad=iw:ih+{2 * bars}:0:{bars}:black" if bars else "null"
+    _ff(
+        "-f",
+        "lavfi",
+        "-i",
+        f"gradients=s={w}x{h - 2 * bars}:c0=0xF4D6A0:c1=0x8CC9A8",
+        "-vf",
+        vf,
+        "-frames:v",
+        1,
+        path,
+    )
+
+
+def test_has_black_bars_detects_letterbox(tmp_path):
+    _png(tmp_path / "ok.png")
+    _png(tmp_path / "bars.png", bars=58)  # 與實際發生的 crop=704:1164 同量級
+    assert not pipeline._has_black_bars(tmp_path / "ok.png", 704, 1280)
+    assert pipeline._has_black_bars(tmp_path / "bars.png", 704, 1280)
+
+
+def test_keyframes_regenerate_with_new_seed_when_black_bars(tmp_path, monkeypatch):
+    seeds = []
+
+    class FakeComfy:
+        def prepare(self): ...
+        def free(self): ...
+
+        def run(self, wf, dest, timeout):
+            seeds.append(wf["ks"]["inputs"]["seed"])
+            dest.parent.mkdir(parents=True, exist_ok=True)  # 與真正的 Comfy._fetch 一致
+            _png(dest, bars=58 if len(seeds) == 1 else 0)  # 只有第一次呼叫有黑邊
+
+    monkeypatch.setattr(pipeline, "Comfy", FakeComfy)
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = tmp_path / "job"
+    d.mkdir()
+    plan = {
+        "topic": "t",
+        "slug": "t",
+        "style": "s",
+        "character": "a round brown bear cub with a red scarf",
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        "seed": 7,
+        "shots": [{"id": i, "prompt": "p"} for i in range(1, 6)],
+    }
+    (d / "plan.json").write_text(json.dumps(plan))
+    (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}}))
+    job = pipeline.Job(d)
+    pipeline.keyframes(job)
+    assert seeds[:2] == [8, 1008]  # shot 1 先用 seed+1，有黑邊後用 seed+1+1000
+    assert len(seeds) == 6  # 其餘 4 鏡各 1 次
+    assert job.meta["shots"]["1"]["seed"] == 1008  # meta 記錄實際使用的 seed
+    assert not pipeline._has_black_bars(d / "keyframes" / "01.png", 704, 1280)
+
+
+def test_bench_counts_only_jobs_that_finished_qc(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    for name, done in (("a", True), ("b", True), ("c", False)):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "meta.json").write_text(
+            json.dumps({"timings": {"clips": 100 if name == "a" else 300}})
+        )
+        if done:
+            (tmp_path / name / "status.json").write_text("{}")
+    row = pipeline.bench().splitlines()[-1]
+    assert "| 2 |" in row and "200s" in row  # 只算 a、b：支數 2、clips 平均 200 秒
+
+
+_OK_PLAN = {
+    "topic": "t",
+    "slug": "bear-brush",
+    "style": "flat 2D cartoon",
+    "character": "a round brown bear cub with a red scarf",
+    "shots": [{"id": 1, "prompt": "the bear holds a short straight toothbrush and smiles"}],
+    "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+}
+
+
+def test_plan_accepts_toothbrush_but_rejects_risky_words():
+    Plan.model_validate(_OK_PLAN)  # toothbrush 本身可以，teeth/tooth 單字才擋
+    risky = [
+        "the bear shows its teeth",  # 牙齒
+        "the bear opens its mouth wide",  # 嘴巴
+        "the bear grins at the mirror",
+        "the bear uses dental floss",  # 細長會彎的物體
+        "the bear pours water into a cup",  # 液體
+        "the bear blows soap bubbles",  # 泡沫
+        "the bear squeezes toothpaste onto the brush",
+        "the toothbrush bends as the bear brushes",  # 彎曲
+    ]
+    for prompt in risky:
+        with pytest.raises(ValueError, match="高風險字眼"):
+            Plan.model_validate({**_OK_PLAN, "shots": [{"id": 1, "prompt": prompt}]})
+    # character 也不能提牙齒（實際發生過：LLM 寫了 bright yellow teeth，FLUX 就畫出怪牙）
+    with pytest.raises(ValueError, match="高風險字眼"):
+        Plan.model_validate(
+            {**_OK_PLAN, "character": "a cute orange bear with a blue toothbrush and bright yellow teeth"}
+        )
+
+
+def test_risky_rules_not_applied_to_photo_mode(tmp_path, monkeypatch):
+    """照片模式的描述來自使用者：不套用 RISKY，但中文描述要在 _use_photos 就清楚報錯。"""
+    plan, src, d = _photo_job(tmp_path, monkeypatch, n_photos=1)
+    (src / "dog1.txt").write_text("a dog with an open mouth")
+    used = pipeline._use_photos(plan, [src], d)
+    Plan.model_validate_json(plan.model_dump_json())  # 存檔後重新載入（Job 每階段都會做）不能失敗
+    assert used[0]["desc"] == ["a dog with an open mouth"]
+    (tmp_path / "x").mkdir()
+    plan2, src2, d2 = _photo_job(tmp_path / "x", monkeypatch, n_photos=1)
+    (src2 / "dog1.txt").write_text("一隻黃金獵犬")
+    with pytest.raises(ValueError, match="純英文"):
+        pipeline._use_photos(plan2, [src2], d2)
+
+
+def test_wan_negative_prompt_mentions_teeth_and_bent_objects():
+    neg = fill("clip", prompt="p", image="i", seed=1, width=1, height=1, length=121)["neg"]["inputs"]["text"]
+    assert "牙齿变形" in neg and "弯曲的牙刷" in neg
+
+
+def test_prop_color_must_be_fixed_across_shots():
+    ok = {
+        **_OK_PLAN,
+        "prop": "a short straight blue toothbrush",
+        "shots": [
+            {"id": 1, "prompt": "the bear holds the toothbrush and waves"},
+            {"id": 2, "prompt": "the bear tilts its head with a short straight blue toothbrush"},
+        ],
+    }
+    plan = Plan.model_validate(ok)
+    # prop 併入每鏡固定前綴，道具顏色由程式保證一致
+    assert plan.full_prompt(plan.shots[0]).startswith(
+        "flat 2D cartoon, a round brown bear cub with a red scarf, holding a short straight blue toothbrush, the bear holds"
+    )
+    for bad_prop, shots, msg in (
+        ("a short straight toothbrush", ok["shots"], "必須寫出顏色"),  # prop 沒顏色
+        (
+            "a short straight blue toothbrush",
+            [{"id": 1, "prompt": "the bear waves a pink toothbrush"}],
+            "不同",
+        ),  # 某鏡換成粉紅色
+        (
+            "a short straight blue toothbrush",
+            [{"id": 1, "prompt": "the bear holds a red and white toothbrush"}],
+            "不同",
+        ),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            Plan.model_validate({**ok, "prop": bad_prop, "shots": shots})
+    # 場景顏色不受影響（只檢查道具名詞前面的顏色）
+    Plan.model_validate(
+        {**ok, "shots": [{"id": 1, "prompt": "the bear sits on a green lawn holding the blue toothbrush"}]}
+    )
+    # 沒有 prop（不需要道具的主題）照常通過；舊的 plan.json 沒有 prop 欄位也能載入
+    assert Plan.model_validate(_OK_PLAN).prop == ""
+
+
+def test_make_plan_accepts_null_prop(monkeypatch):
+    from videomaker import plan as planmod
+
+    reply = {
+        **_OK_PLAN,
+        "prop": None,
+        "youtube": _BILINGUAL_YT,
+        "shots": [{"id": i, "prompt": "the bear waves"} for i in range(1, 6)],
+    }
+
+    class R:
+        def raise_for_status(self): ...
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(reply)}}]}
+
+    monkeypatch.setattr(planmod.requests, "post", lambda *a, **k: R())
+    assert planmod.make_plan("t", 5, 120).prop == ""
+
+
+@pytest.mark.parametrize("bpm", range(100, 141))
+def test_shot_math_long_bounds(bpm):
+    from videomaker.plan import FORMATS
+
+    shot, _, total = shot_math(bpm, "long")
+    assert shot <= 5.0 and FORMATS["long"]["min_total"] <= total <= FORMATS["long"]["max_total"]
+    assert total < 180  # YouTube Shorts 上限 3:00，必須留餘裕
+
+
+def test_build_layout_cycles_with_new_order_and_no_adjacent_repeat():
+    from videomaker.plan import build_layout
+
+    lay = build_layout(14, 42, seed=5)
+    assert len(lay) == 42 and lay[:14] == list(range(1, 15))  # 第一輪照順序
+    assert all(lay.count(i) == 3 for i in range(1, 15))  # 每個鏡頭剛好 3 次
+    assert lay[14:28] != lay[:14] and lay[28:] != lay[:14]  # 之後每輪換順序
+    assert all(a != b for a, b in itertools.pairwise(lay))  # 相鄰時段不同鏡頭
+    assert lay == build_layout(14, 42, seed=5) != build_layout(14, 42, seed=6)  # 可重現，seed 不同順序不同
+    assert len(build_layout(14, 35, seed=5)) == 35  # 時段數不是整輪也行（BPM 100 時 35 個時段）
+
+
+def test_plan_rejects_layout_with_unknown_shot_id():
+    with pytest.raises(ValueError, match="layout"):
+        Plan.model_validate({**_OK_PLAN, "layout": [1, 2]})  # 只有 shot 1
+
+
+def test_long_format_mux_reuses_clips_with_offsets_and_qc_uses_long_bounds(tmp_path, monkeypatch):
+    """長片：4 個獨特鏡頭填 10 個時段。縮小片型參數讓測試只跑幾秒，邏輯與正式長片相同。"""
+    from videomaker import plan as planmod
+
+    monkeypatch.setattr(visual_qc, "check", lambda job: {"status": "passed"})
+
+    monkeypatch.setitem(
+        planmod.FORMATS, "long", {"target": 40, "min_total": 30, "max_total": 45, "unique": 4}
+    )
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = tmp_path / "2026-01-01_long"
+    (d / "clips").mkdir(parents=True)
+    _, n_slots, _ = shot_math(120, "long")
+    assert n_slots == 10
+    plan = {
+        "topic": "t",
+        "slug": "t",
+        "style": "s",
+        "character": "a round brown bear cub with a red scarf",
+        "seed": 3,
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        "shots": [{"id": i, "prompt": "p"} for i in range(1, 5)],
+        "layout": planmod.build_layout(4, n_slots, 3),
+    }
+    (d / "plan.json").write_text(json.dumps(plan))
+    (d / "meta.json").write_text(json.dumps({"format": "long", "timings": {}, "models": {}, "shots": {}}))
+    for i, color in enumerate(["red", "green", "blue", "yellow"], 1):
+        _ff(
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={color}:s=704x1280:r=24:d=5.05",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            d / "clips" / f"{i:02d}.mp4",
+        )
+    click_track(d / "music.wav", 120, offset=0.37, secs=60)
+    (d / "beats.json").write_text(json.dumps(audio.analyze(d / "music.wav", 120, n_slots)))
+    job = pipeline.Job(d)
+    assert job.fmt == "long"
+    pipeline.mux(job)
+    pipeline.qc(job)
+    status = json.loads((d / "status.json").read_text())
+    assert status["status"] == "pending_review", status
+    assert "duration_30_45" in status["checks"] and 39 <= status["details"]["duration"] <= 41
+
+
+def test_nightly_deadline_estimate_and_topics(monkeypatch):
+    from datetime import datetime
+
+    from videomaker import nightly
+
+    night = datetime(2026, 10, 6, 22, 0).astimezone()
+    assert nightly.deadline_after(night, "07:00") == night.replace(
+        day=7, hour=7
+    )  # 晚上 22:00 啟動 → 隔天 07:00
+    assert nightly.deadline_after(night.replace(hour=2), "07:00") == night.replace(
+        hour=7
+    )  # 凌晨 2 點 → 當天 07:00
+    assert nightly.deadline_after(night.replace(hour=7), "07:00") == night.replace(
+        day=7, hour=7
+    )  # 剛好 07:00 → 算下一個
+    monkeypatch.setattr(config, "STEPS", 20)
+    short, long = nightly.estimate("short"), nightly.estimate("long")
+    assert 30 * 60 < short < 45 * 60 and 90 * 60 < long < 130 * 60  # 實測短片 30 分鐘、長片估約 1.5–2 小時
+    monkeypatch.setattr(config, "STEPS", 40)
+    assert nightly.estimate("long") > 2 * 90 * 60  # 步數加倍，長片預估也跟著加倍
+    # 22:00–07:00 共 9 小時：預設的每晚組合（short、long、xl 各 1 支）在 20 步下要塞得進去，且留有餘裕
+    monkeypatch.setattr(config, "STEPS", 20)
+    assert sum(nightly.estimate(f) for f in nightly.NIGHT) < 6 * 3600
+
+
+def test_suggest_topics_filters_duplicates_and_retries(monkeypatch):
+    from videomaker import nightly
+
+    replies = iter(
+        [
+            {
+                "topics": ["小熊刷牙", "小貓睡覺", "小貓睡覺", "x"]
+            },  # 小熊刷牙已做過、重複、太短 → 只剩 1 個可用，不夠
+            {"topics": ["小貓睡覺", "小兔跳舞", "小鳥唱歌", "小熊刷牙"]},
+        ]
+    )
+
+    class R:
+        def __init__(self, d):
+            self.d = d
+
+        def raise_for_status(self): ...
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(self.d)}}]}
+
+    monkeypatch.setattr(nightly.requests, "post", lambda *a, **k: R(next(replies)))
+    assert nightly.suggest_topics(3, ["小熊刷牙"]) == ["小貓睡覺", "小兔跳舞", "小鳥唱歌"]
+    monkeypatch.setattr(nightly.requests, "post", lambda *a, **k: R({"topics": ["小熊刷牙"]}))
+    with pytest.raises(RuntimeError, match="3 次"):
+        nightly.suggest_topics(2, ["小熊刷牙"])
+
+
+def test_nightly_runs_in_order_skips_when_too_late_and_retries_once(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "STEPS", 20)
+    monkeypatch.setattr(nightly, "suggest_topics", lambda n, avoid: ["甲", "乙", "丙"][:n])
+    calls = []
+
+    class FakeJob:
+        def __init__(self, topic):
+            self.dir = tmp_path / topic
+            self.dir.mkdir(exist_ok=True)
+            (self.dir / "status.json").write_text(json.dumps({"status": "pending_review"}))
+
+        def p(self, name):
+            return self.dir / name
+
+    def fake_run(topic, fmt="short", resume=False):
+        calls.append((topic, fmt, resume))
+        if topic == "乙" and not resume:
+            raise RuntimeError("ComfyUI 暫時掛掉")  # 第一次失敗、重試成功
+        return FakeJob(topic)
+
+    monkeypatch.setattr(nightly.pipeline, "run", fake_run)
+    sleeps = []
+    in_55_min = (datetime.now().astimezone() + timedelta(minutes=55)).strftime("%H:%M")
+    res = nightly.nightly(["short", "short", "long"], in_55_min, sleep=sleeps.append)
+    assert [r["status"] for r in res] == [
+        "pending_review",
+        "pending_review",
+        "skipped",
+    ]  # 長片預估 > 55 分鐘 → 略過
+    assert calls == [("甲", "short", False), ("乙", "short", False), ("乙", "short", True)]  # 乙重試時 resume
+    assert sleeps == [nightly.RETRY_WAIT]
+    hist = [json.loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
+    assert [h["topic"] for h in hist] == ["甲", "乙", "丙"] and hist[2]["status"] == "skipped"
+    # 全部失敗：記錄 failed，不丟例外（排程不能被單支拖垮）
+    monkeypatch.setattr(nightly.pipeline, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("壞了")))
+    res = nightly.nightly(["short"], in_55_min, sleep=lambda s: None)
+    assert res[0]["status"] == "failed" and "壞了" in res[0]["error"]
+
+
+def test_wait_cool_polls_until_below_threshold_and_respects_latest_start(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "COOL_TEMP", 45)
+    later = datetime.now().astimezone() + timedelta(hours=1)
+    temps = iter([85, 60, 45])  # 45 = 剛好達標（門檻是「大於才等」）
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: next(temps))
+    sleeps = []
+    nightly.wait_cool(later, sleeps.append)
+    assert sleeps == [nightly.COOL_POLL] * 2
+    # 一直降不下來：到 latest_start 就放棄等，不能無限卡住
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: 85)
+    sleeps.clear()
+    nightly.wait_cool(datetime.now().astimezone() - timedelta(seconds=1), sleeps.append)
+    assert sleeps == []
+    # 讀不到溫度（非 GX10）→ 不等
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: None)
+    nightly.wait_cool(later, sleeps.append)
+    assert sleeps == []
+    # 整合：溫度降不下來又趕不上 deadline → 該支被略過、不跑
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(nightly, "suggest_topics", lambda n, avoid: ["甲"])
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: 85)
+    monkeypatch.setattr(nightly.pipeline, "run", lambda *a, **k: pytest.fail("不該開跑"))
+    in_55_min = (datetime.now().astimezone() + timedelta(minutes=55)).strftime("%H:%M")
+    res = nightly.nightly(["long"], in_55_min, sleep=lambda s: None)
+    assert res[0]["status"] == "skipped"
+
+
+def test_simplified_chinese_rejected_in_youtube_fields_but_traditional_ok():
+    ok = {
+        **_OK_PLAN,
+        "youtube": {
+            "title": "小熊刷牙｜快樂的刷牙時間",
+            "description": "跟著小熊一起學習",
+            "tags": ["兒童音樂", "小熊"],
+        },
+    }
+    Plan.model_validate(ok)
+    for field, bad in (
+        ("title", "小熊刷牙｜快乐的刷牙时间"),
+        ("description", "跟随小熊一起学习"),
+        ("tags", ["儿童音乐"]),
+    ):
+        with pytest.raises(ValueError, match="簡體字"):
+            Plan.model_validate({**ok, "youtube": {**ok["youtube"], field: bad}})
+    # 兔、松、面 等繁簡同形字不能被誤判
+    Plan.model_validate({**ok, "youtube": {"title": "松鼠與兔子", "description": "麵包", "tags": []}})
+
+
+def test_suggest_topics_drops_simplified(monkeypatch):
+    from videomaker import nightly
+
+    class R:
+        def raise_for_status(self): ...
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"topics": ["小猫跳舞", "小貓跳舞", "风吹树叶", "小松鼠跳舞", "小兔睡覺"]}
+                            )
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(nightly.requests, "post", lambda *a, **k: R())
+    assert nightly.suggest_topics(3, []) == ["小貓跳舞", "小松鼠跳舞", "小兔睡覺"]
+
+
+def test_cli_images_accepts_one_or_two_dirs_and_passes_a_list(monkeypatch, tmp_path):
+    """CLI 層級：--images 要能收 1 或 2 個資料夾，並以 list 傳給 pipeline.run（先前只有函式層測試，CLI 其實是壞的）。"""
+    from pathlib import Path
+
+    from videomaker import __main__ as cli
+
+    p = cli.build_parser()
+    a = p.parse_args(["make", "主題", "--images", "photos/a", "photos/b", "--stage", "keyframes"])
+    assert a.images == [Path("photos/a"), Path("photos/b")] and a.stage == "keyframes"
+    assert p.parse_args(["make", "主題", "--images", "photos/a"]).images == [Path("photos/a")]
+    assert p.parse_args(["make", "主題"]).images is None
+
+    seen = {}
+
+    class FakeJob:
+        dir = tmp_path
+
+    def fake_run(topic, upto, dry_run, resume, images, fmt):
+        seen.update(topic=topic, upto=upto, images=images, fmt=fmt)
+        return FakeJob()
+
+    monkeypatch.setattr(cli.pipeline, "run", fake_run)
+    cli.main(["make", "主題", "--images", "x", "y", "--format", "long", "--stage", "keyframes"])
+    assert seen == {"topic": "主題", "upto": "keyframes", "images": [Path("x"), Path("y")], "fmt": "long"}
+
+
+class _FakeReq:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+
+    def next_chunk(self):
+        o = self.outcomes.pop(0)
+        if isinstance(o, Exception):
+            raise o
+        return None, o
+
+
+class _FakeYT:
+    def __init__(self, outcomes):
+        self.outcomes, self.calls = outcomes, []
+
+    def videos(self):
+        return self
+
+    def insert(self, part, body, media_body):
+        self.calls.append({"part": part, "body": body, "size": media_body.size()})
+        return _FakeReq(self.outcomes)
+
+
+def _yt_job(tmp_path, status="approved", images=None):
+    d = tmp_path / "2026-01-01_t"
+    d.mkdir()
+    plan = {
+        **_OK_PLAN,
+        "youtube": {
+            "title": "小熊刷牙｜" + "長" * 120,
+            "description": "跟著小熊一起學習",
+            "tags": ["兒童音樂", "小熊", "a b"],
+        },
+    }
+    (d / "plan.json").write_text(json.dumps(plan))
+    (d / "meta.json").write_text(json.dumps({"timings": {}, **({"images": images} if images else {})}))
+    (d / "status.json").write_text(json.dumps({"status": status}))
+    (d / "final.mp4").write_bytes(b"x" * 1000)
+    return d
+
+
+def test_youtube_body_is_private_kids_and_trimmed(tmp_path):
+    from videomaker import youtube
+
+    d = _yt_job(tmp_path)
+    plan = Plan.model_validate_json((d / "plan.json").read_text())
+    b = youtube.build_body(plan, {})
+    assert b["status"] == {
+        "privacyStatus": "private",
+        "selfDeclaredMadeForKids": True,
+        "containsSyntheticMedia": False,
+    }
+    assert len(b["snippet"]["title"]) == 100 and b["snippet"]["tags"] == ["兒童音樂", "小熊", "a b"]
+    assert (
+        youtube.build_body(plan, {"images": [{"shot": 1}]})["status"]["containsSyntheticMedia"] is True
+    )  # 照片模式
+    many = plan.model_copy(
+        update={"youtube": plan.youtube.model_copy(update={"tags": [f"標籤{i:03d}" * 3 for i in range(100)]})}
+    )
+    assert sum(len(t) + 1 for t in youtube.build_body(many, {})["snippet"]["tags"]) <= 500
+
+
+def test_youtube_upload_requires_approval_and_is_idempotent(tmp_path):
+    from videomaker import youtube
+
+    (tmp_path / "x").mkdir()
+    pending = _yt_job(tmp_path / "x", status="pending_review")
+    with pytest.raises(ValueError, match="必須先人工核准"):
+        youtube.upload(pending, service=_FakeYT([{"id": "zzz"}]))
+    youtube.set_review(pending, "approved")
+    assert json.loads((pending / "status.json").read_text())["status"] == "approved"
+    svc = _FakeYT([{"id": "vid123", "status": {"privacyStatus": "private"}}])
+    assert youtube.upload(pending, service=svc) == "vid123"
+    assert svc.calls[0]["part"] == "snippet,status" and svc.calls[0]["size"] == 1000
+    saved = json.loads((pending / "meta.json").read_text())
+    assert saved["youtube_id"] == "vid123" and saved["youtube_privacy"] == "private"
+    assert (
+        youtube.upload(pending, service=_FakeYT([])) == "vid123"
+    )  # 第二次不會再呼叫 API（outcomes 是空的，呼叫就會爆）
+
+
+def test_youtube_upload_retries_transient_errors_but_not_quota(tmp_path, monkeypatch):
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    from videomaker import youtube
+
+    monkeypatch.setattr(youtube.time, "sleep", lambda s: None)
+    err = lambda code: HttpError(httplib2.Response({"status": code}), b"{}")
+    (tmp_path / "a").mkdir()
+    assert (
+        youtube.upload(_yt_job(tmp_path / "a"), service=_FakeYT([err(503), err(502), {"id": "ok1"}])) == "ok1"
+    )
+    (tmp_path / "b").mkdir()
+    with pytest.raises(HttpError):  # 403 額度／權限錯誤：重試沒用，直接拋出
+        youtube.upload(_yt_job(tmp_path / "b"), service=_FakeYT([err(403)]))
+
+
+def test_youtube_pending_approved_lists_only_approved_not_uploaded(tmp_path, monkeypatch):
+    from videomaker import youtube
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    for name, status, vid in (
+        ("a", "approved", None),
+        ("b", "pending_review", None),
+        ("c", "approved", "done"),
+        ("d", "rejected", None),
+    ):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "status.json").write_text(json.dumps({"status": status}))
+        (d / "meta.json").write_text(json.dumps({"youtube_id": vid} if vid else {}))
+    assert [p.name for p in youtube.pending_approved()] == ["a"]
+
+
+def test_cli_upload_approved_continues_after_one_failure(monkeypatch, tmp_path, capsys):
+    from videomaker import __main__ as cli
+
+    jobs = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+    monkeypatch.setattr(cli.youtube, "pending_approved", lambda: jobs)
+
+    def fake_upload(d):
+        if d.name == "b":
+            raise RuntimeError("額度用完")
+        return f"id-{d.name}"
+
+    monkeypatch.setattr(cli.youtube, "upload", fake_upload)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["upload-approved"])
+    out = capsys.readouterr().out
+    assert (
+        e.value.code == 1 and "a id-a" in out and "c id-c" in out and "b 失敗" in out
+    )  # b 失敗，a、c 仍上傳
+
+
+def test_listing_shows_review_state_of_each_job(tmp_path, monkeypatch):
+    from videomaker import youtube
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    cases = {
+        "a": ("pending_review", None, 20.0),
+        "b": ("approved", None, 20.0),
+        "c": ("approved", "vid9", 168.0),
+        "d": ("rejected", None, 20.0),
+        "e": ("failed", None, 20.0),
+        "f": (None, None, 0),
+    }
+    for name, (status, vid, dur) in cases.items():
+        d = tmp_path / name
+        d.mkdir()
+        (d / "plan.json").write_text(json.dumps({**_OK_PLAN, "topic": f"主題{name}"}))
+        (d / "meta.json").write_text(
+            json.dumps({"format": "long" if name == "c" else "short", **({"youtube_id": vid} if vid else {})})
+        )
+        if status:
+            (d / "status.json").write_text(json.dumps({"status": status, "details": {"duration": dur}}))
+    rows = youtube.listing()
+    assert rows == [
+        "a | short | 待審核 | 20s | 主題a",
+        "b | short | 已核准（待上傳） | 20s | 主題b",
+        "c | long | 已上傳 vid9 | 168s | 主題c",
+        "d | short | 不通過 | 20s | 主題d",
+        "e | short | QC 失敗 | 20s | 主題e",
+        "f | short | 未完成 | - | 主題f",
+    ]
+
+
+_BILINGUAL_YT = {
+    "title": "風鈴輕響｜Wind Chime Song for Kids",
+    "description": "跟著小松鼠聽風鈴的聲音。\n輕快的音樂適合小朋友。\n\nA cheerful squirrel listens to wind chimes. Gentle music made for little kids.\n\n#KidsMusic #Shorts #NurseryRhymes",
+    "tags": ["兒童音樂", "風鈴", "kids songs", "nursery rhymes", "baby songs"],
+}
+
+
+def test_check_bilingual_requires_chinese_and_english_everywhere():
+    from videomaker.plan import Youtube, check_bilingual
+
+    check_bilingual(Youtube(**_BILINGUAL_YT))
+    for field, bad, msg in (
+        ("title", "風鈴輕響－兒童音樂短片", "雙語"),  # 只有中文
+        ("title", "Wind Chime Song for Kids", "雙語"),  # 只有英文
+        ("title", "風鈴輕響｜" + "Wind Chime " * 10, "100"),  # 太長，英文會被截斷
+        ("description", "跟著小松鼠聽風鈴的聲音。", "英文單字"),
+        ("tags", ["兒童音樂", "風鈴", "kids songs"], "英文標籤"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            check_bilingual(Youtube(**{**_BILINGUAL_YT, field: bad}))
+
+
+def test_make_plan_retries_until_youtube_fields_are_bilingual(monkeypatch):
+    from videomaker import plan as planmod
+
+    zh_only = {"title": "風鈴輕響", "description": "跟著小松鼠聽風鈴。", "tags": ["兒童音樂"]}
+    replies = iter([zh_only, _BILINGUAL_YT])
+    sent = []
+
+    class R:
+        def __init__(self, yt):
+            self.yt = yt
+
+        def raise_for_status(self): ...
+        def json(self):
+            reply = {
+                **_OK_PLAN,
+                "youtube": self.yt,
+                "shots": [{"id": i, "prompt": "the bear waves"} for i in range(1, 6)],
+            }
+            return {"choices": [{"message": {"content": json.dumps(reply)}}]}
+
+    def fake_post(url, json=None, **kw):
+        sent.append(json["messages"])
+        return R(next(replies))
+
+    monkeypatch.setattr(planmod.requests, "post", fake_post)
+    plan = planmod.make_plan("t", 5, 120)
+    assert plan.youtube.title == "風鈴輕響｜Wind Chime Song for Kids"
+    assert len(sent) == 2 and "雙語" in sent[1][-1]["content"]  # 第一次中文單語被退回，並把原因告訴 LLM
+
+
+class _Proc:
+    def __init__(self, out="", code=0):
+        self.stdout, self.returncode = out, code
+
+
+def _renew_env(monkeypatch, remote, local="ok", confirm=True, copy_code=0, after="ok"):
+    """替換 renew_token 用到的外部動作，記錄呼叫順序。"""
+    from videomaker import youtube
+
+    calls, remotes = [], iter([remote, after])
+    monkeypatch.setattr(youtube, "remote_status", lambda: next(remotes))
+    monkeypatch.setattr(youtube, "token_status", lambda: local)
+    monkeypatch.setattr(youtube, "auth", lambda: calls.append("auth"))
+    monkeypatch.setattr(youtube, "_ask", lambda msg: calls.append("ask") or confirm)
+    monkeypatch.setattr(youtube, "_notify", lambda msg: calls.append(f"notify:{msg}"))
+    monkeypatch.setattr(
+        youtube,
+        "_sh",
+        lambda cmd, timeout=120: calls.append(cmd[0]) or _Proc(code=copy_code if cmd[0] == "scp" else 0),
+    )
+    return youtube, calls
+
+
+def test_renew_token_does_nothing_when_gx10_token_is_ok(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "ok")
+    assert youtube.renew_token() == "ok" and calls == []  # 不打擾你
+
+
+def test_renew_token_unreachable_only_notifies(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "unreachable")
+    assert youtube.renew_token() == "unreachable"
+    assert calls == ["notify:連不上 GX10，無法檢查 YouTube token"]
+
+
+def test_renew_token_declined_does_not_touch_anything(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "expired", confirm=False)
+    assert youtube.renew_token() == "declined" and calls == ["ask"]  # 只問，沒有授權也沒有複製
+
+
+def test_renew_token_reuses_valid_local_token_then_copies(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "expired", local="ok")
+    assert youtube.renew_token() == "ok"
+    assert (
+        calls[:3] == ["ask", "scp", "ssh"] and "auth" not in calls
+    )  # 本機 token 有效 → 不重新授權，直接複製、chmod
+    assert calls[-1].startswith("notify:YouTube 授權已更新")
+
+
+def test_renew_token_reauthorizes_when_local_token_also_expired(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "missing", local="expired")
+    assert youtube.renew_token() == "ok"
+    assert calls[:4] == ["ask", "auth", "scp", "ssh"]  # 先問 → 授權 → 複製 → chmod 600
+
+
+def test_renew_token_reports_copy_failure_and_unverified_remote(monkeypatch):
+    youtube, calls = _renew_env(monkeypatch, "expired", copy_code=1)
+    assert youtube.renew_token() == "copy-failed" and calls[-1] == "notify:token 複製到 GX10 失敗"
+    youtube, calls = _renew_env(monkeypatch, "expired", after="expired")
+    assert (
+        youtube.renew_token() == "expired" and "GX10 驗證仍是 expired" in calls[-1]
+    )  # 複製了但遠端仍不通過，不能說成功
+
+
+def test_remote_status_parses_last_line_and_rejects_garbage(monkeypatch):
+    from videomaker import youtube
+
+    monkeypatch.setattr(youtube, "_sh", lambda cmd, timeout=120: _Proc("Warning: banner line\nexpired\n"))
+    assert youtube.remote_status() == "expired"
+    monkeypatch.setattr(
+        youtube,
+        "_sh",
+        lambda cmd, timeout=120: _Proc("ssh: connect to host gx10 port 22: Operation timed out", 255),
+    )
+    assert youtube.remote_status() == "unreachable"
+
+
+def test_ask_detects_the_confirm_button(monkeypatch):
+    from videomaker import youtube
+
+    monkeypatch.setattr(
+        youtube, "_sh", lambda cmd, timeout=120: _Proc("button returned:重新授權, gave up:false\n")
+    )
+    assert youtube._ask("x") is True
+    monkeypatch.setattr(
+        youtube, "_sh", lambda cmd, timeout=120: _Proc("button returned:稍後再說, gave up:false\n")
+    )
+    assert youtube._ask("x") is False
+    monkeypatch.setattr(
+        youtube, "_sh", lambda cmd, timeout=120: _Proc("", 1)
+    )  # 使用者按 Esc／沒有圖形工作階段：不能當成確認
+    assert youtube._ask("x") is False
+
+
+def test_token_status_missing_and_expired(monkeypatch, tmp_path):
+    from google.auth.exceptions import RefreshError
+    from google.oauth2.credentials import Credentials
+
+    from videomaker import youtube
+
+    monkeypatch.setattr(youtube, "TOKEN", tmp_path / "token.json")
+    assert youtube.token_status() == "missing"
+    (tmp_path / "token.json").write_text("{}")
+
+    class Expired:
+        def refresh(self, request):
+            raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    monkeypatch.setattr(Credentials, "from_authorized_user_file", classmethod(lambda cls, *a, **k: Expired()))
+    assert youtube.token_status() == "expired"
+
+    class Fresh:
+        def refresh(self, request): ...
+        def to_json(self):
+            return '{"refreshed": true}'
+
+    monkeypatch.setattr(Credentials, "from_authorized_user_file", classmethod(lambda cls, *a, **k: Fresh()))
+    assert youtube.token_status() == "ok" and (tmp_path / "token.json").read_text() == '{"refreshed": true}'
+    assert oct((tmp_path / "token.json").stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize("bpm", range(100, 141))
+def test_shot_math_xl_is_about_five_minutes(bpm):
+    from videomaker.plan import FORMATS
+
+    shot, n, total = shot_math(bpm, "xl")
+    assert shot <= 5.0 and 270 <= total <= 330 and n >= 60
+    assert FORMATS["xl"]["unique"] == 20
+
+
+def test_xl_layout_reuses_each_shot_about_four_times_without_adjacent_repeats():
+    import itertools
+
+    from videomaker.plan import build_layout
+
+    lay = build_layout(20, 75, seed=9)
+    assert len(lay) == 75 and set(lay) == set(range(1, 21))
+    assert all(3 <= lay.count(i) <= 4 for i in range(1, 21))  # 75 = 3×20 + 15
+    assert all(a != b for a, b in itertools.pairwise(lay))
+
+
+def test_photo_mode_20_shots_never_repeat_a_photo_and_scene_combination(tmp_path, monkeypatch):
+    """5 分鐘版 20 個獨特鏡頭：照片組合（5 張輪流）與場景（7 個輪流）的組合不能重複，否則看起來是同一支畫面。"""
+    import itertools
+
+    plan, a, d = _photo_job(tmp_path, monkeypatch, n_photos=5)
+    b = tmp_path / "dogsB"
+    b.mkdir()
+    for i in range(1, 6):
+        _ff("-f", "lavfi", "-i", "color=c=white:s=1080x1920:d=1", "-frames:v", 1, b / f"b{i}.jpg")
+    plan.shots = [plan.shots[0].model_copy(update={"id": i}) for i in range(1, 21)]
+    used = pipeline._use_photos(plan, [a, b], d)
+    combos = [(tuple(u["files"]), u["scene"]) for u in used]
+    assert len(set(combos)) == 20
+    assert len(pipeline.SCENES) == 7 and all(x != y for x, y in itertools.pairwise(u["scene"] for u in used))
+
+
+@pytest.mark.parametrize("fmt,unique,slots", [("short", 5, 5), ("long", 14, 42), ("xl", 20, 75)])
+def test_new_job_builds_reuse_layout_for_every_format_that_reuses_shots(
+    tmp_path, monkeypatch, fmt, unique, slots
+):
+    """每種片型：獨特鏡頭數、時段數、layout 長度都要對得上（xl 曾經漏建 layout，合成階段要跑到最後才會爆）。"""
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    seen = {}
+
+    def fake_make_plan(topic, n_shots, bpm, long=False):
+        seen["args"] = (n_shots, long)
+        return Plan.model_validate(
+            {
+                **_OK_PLAN,
+                "slug": "t",
+                "shots": [{"id": i, "prompt": "the bear waves"} for i in range(1, n_shots + 1)],
+            }
+        )
+
+    monkeypatch.setattr(pipeline, "make_plan", fake_make_plan)
+    job = pipeline.new_job("主題", fmt=fmt)
+    assert seen["args"] == (unique, unique < slots)  # 長片要告訴 LLM「鏡頭會被重複播放」
+    assert len(job.plan.shots) == unique
+    assert len(job.plan.layout) == (slots if unique < slots else 0)
+    if unique < slots:
+        assert set(job.plan.layout) == set(range(1, unique + 1))  # 每個獨特鏡頭都被排到
+    assert job.fmt == fmt
+
+
+def test_clip_workflow_suppresses_hands_and_toys_only_in_photo_mode(tmp_path):
+    d = tmp_path / "j"
+    d.mkdir()
+    (d / "plan.json").write_text(json.dumps(_OK_PLAN))
+    shot = Plan.model_validate(_OK_PLAN).shots[0]
+    photo_meta = {"timings": {}, "models": {}, "shots": {}, "images": [{"shot": 1}]}
+    plain = pipeline.Job.__new__(pipeline.Job)
+    plain.dir, plain.plan, plain.meta, plain.size = (
+        d,
+        Plan.model_validate(_OK_PLAN),
+        {"timings": {}},
+        pipeline.SIZE,
+    )
+    photo = pipeline.Job.__new__(pipeline.Job)
+    photo.dir, photo.plan, photo.meta, photo.size = d, plain.plan, photo_meta, pipeline.SIZE
+    wf_plain, wf_photo = (
+        pipeline.clip_workflow(plain, shot, "i.png", 7),
+        pipeline.clip_workflow(photo, shot, "i.png", 7),
+    )
+    assert (
+        pipeline.PHOTO_NEG not in wf_plain["neg"]["inputs"]["text"]
+        and pipeline.PHOTO_SUFFIX not in wf_plain["pos"]["inputs"]["text"]
+    )
+    assert wf_photo["neg"]["inputs"]["text"].endswith(pipeline.PHOTO_NEG) and wf_photo["pos"]["inputs"][
+        "text"
+    ].endswith(pipeline.PHOTO_SUFFIX)
+    assert (
+        wf_photo["ks"]["inputs"]["seed"] == wf_plain["ks"]["inputs"]["seed"] == 7
+    )  # 其餘設定完全相同，才能公平比較
+    assert wf_photo["neg"]["inputs"]["text"].startswith(
+        wf_plain["neg"]["inputs"]["text"]
+    )  # 原本的負向提示詞完整保留
+
+
+def test_nightly_default_plan_is_short_long_xl_everywhere():
+    from videomaker import __main__ as cli
+    from videomaker import nightly
+
+    assert nightly.NIGHT == ["short", "long", "xl"]
+    assert (
+        cli.build_parser().parse_args(["nightly"]).plan == "short,long,xl"
+    )  # CLI 預設與 cron（沒帶 --plan）一致
+    assert [f for f in nightly.NIGHT if f not in nightly.FORMATS] == []  # 每個片型都存在
+
+
+def test_nas_publishing_removed_and_default_stage_is_qc():
+    from videomaker import __main__ as cli
+
+    assert pipeline.STAGES[-1] == "qc" and "publish_nas" not in pipeline.FNS
+    assert not hasattr(pipeline, "publish_nas")
+    assert not hasattr(config, "NAS_TARGET") and not hasattr(config, "NAS_SSH")
+    assert cli.build_parser().parse_args(["make", "主題"]).stage == "qc"
+
+
+@pytest.fixture
+def visual_env(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    (tmp_path / "clips").mkdir()
+    (tmp_path / "clips/01.mp4").write_bytes(b"clip")
+    job = SimpleNamespace(
+        dir=tmp_path,
+        p=lambda *parts: tmp_path.joinpath(*parts),
+        plan=SimpleNamespace(shots=[SimpleNamespace(id=1)], layout=[1, 1, 1]),
+        meta={},
+        windows=lambda: [
+            (1, 0.0, 1.0, 0.0),
+            (1, 0.0, 1.0, 1.0),
+            (1, 0.0, 1.0, 2.0),
+        ],  # (鏡頭, 素材起, 素材終, 成片起)
+    )
+    env = SimpleNamespace(
+        job=job, calls=[], prepared=[], scores=[0.1, 0.8], fail_at=None, digest="test-digest"
+    )
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    monkeypatch.setattr(visual_qc.Comfy, "prepare", lambda self: env.prepared.append(True))
+    monkeypatch.setattr(
+        visual_qc.requests,
+        "get",
+        lambda *a, **k: Response(
+            {
+                "models": [{"name": visual_qc.MODEL, "digest": env.digest}],
+            }
+        ),
+    )
+
+    def post(url, json, timeout):
+        if url.endswith("/api/generate"):
+            env.calls.append("unload")
+            return Response({})
+        count = sum(isinstance(x, dict) for x in env.calls)
+        if count == env.fail_at:
+            raise visual_qc.requests.ConnectionError("Ollama 暫時離線")
+        env.calls.append(json)
+        return Response(
+            {"answers": {key: {"noul": env.scores[count % len(env.scores)]} for key in json["questions"]}}
+        )
+
+    def ffmpeg(args, **kwargs):
+        assert "fps=2,scale=540:-2" in args
+        for number in (1, 2):
+            Path(args[-1] % number).write_bytes(b"jpeg")
+
+    from pathlib import Path
+
+    monkeypatch.setattr(visual_qc.requests, "post", post)
+    monkeypatch.setattr(visual_qc.subprocess, "run", ffmpeg)
+    env.response = Response
+    return env
+
+
+def test_visual_qc_samples_unique_clips_and_records_worst_frame(visual_env):
+    env = visual_env
+    result = visual_qc.check(env.job)
+    assert result["status"] == "flagged" and result["checked_frames"] == 2
+    assert result["model_digest"] == "test-digest"
+    assert result["scores"]["child_safety"] == {
+        "score": 0.8,
+        "source": "clips/01.mp4",
+        "time": 0.5,
+        "final_time": 0.5,
+    }
+    assert len(env.prepared) == 1 and env.calls[-1] == "unload"
+    assert all("images" in c and "keep_alive" in c for c in env.calls if isinstance(c, dict))
+    saved = json.loads(env.job.p("visual_qc.json").read_text())
+    assert len(saved["frames"]) == 2 and saved["questions"] == visual_qc.QUESTIONS
+    assert not env.job.p("visual_qc.tmp").exists()
+
+
+def test_visual_qc_resumes_interrupted_frames_and_skips_completed_results(visual_env):
+    env = visual_env
+    env.fail_at = 1
+    assert visual_qc.check(env.job)["status"] == "error"
+    saved = json.loads(env.job.p("visual_qc.json").read_text())
+    assert len(saved["frames"]) == 1 and env.calls[-1] == "unload"
+    env.fail_at = None
+    assert visual_qc.check(env.job)["status"] == "flagged"
+    assert sum(isinstance(x, dict) for x in env.calls) == 2  # 不重查第一張
+    count = len(env.calls), len(env.prepared)
+    assert visual_qc.check(env.job)["status"] == "flagged"
+    assert (len(env.calls), len(env.prepared)) == count
+    env.job.p("clips/01.mp4").write_bytes(b"regenerated clip")
+    visual_qc.check(env.job)
+    assert sum(isinstance(x, dict) for x in env.calls) == 4  # 素材變更必須重查
+    env.digest = "updated-model"
+    result = visual_qc.check(env.job)
+    assert result["model_digest"] == "updated-model"
+    assert sum(isinstance(x, dict) for x in env.calls) == 6  # 同名模型更新也不能混用舊分數
+
+
+def test_visual_qc_keeps_saved_frames_when_failing_before_new_fingerprint(visual_env, monkeypatch):
+    env = visual_env
+    assert visual_qc.check(env.job)["status"] == "flagged"
+    before = json.loads(env.job.p("visual_qc.json").read_text())
+    online = visual_qc.requests.get
+
+    def offline(*a, **k):
+        raise visual_qc.requests.ConnectionError("Ollama 暫時離線")
+
+    monkeypatch.setattr(visual_qc.requests, "get", offline)
+    assert visual_qc.check(env.job)["status"] == "error"
+    saved = json.loads(env.job.p("visual_qc.json").read_text())
+    assert saved["frames"] == before["frames"] and saved["fingerprint"] == before["fingerprint"]
+    assert saved["summary"]["scores"] == before["summary"]["scores"]
+    monkeypatch.setattr(visual_qc.requests, "get", online)
+    assert visual_qc.check(env.job)["status"] == "flagged"
+    assert sum(isinstance(x, dict) for x in env.calls) == 2  # 離線期間沒丟掉進度，恢復後不重查
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), True, None, -0.1, 1.1, "0.2", 10**400])
+def test_visual_qc_rejects_invalid_scores_without_passing(visual_env, score):
+    env = visual_env
+    env.scores = [score]
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and "無效分數" in result["error"]
+    assert result["checked_frames"] == 0 and result["scores"] == {}
+    assert env.calls[-1] == "unload"
+
+
+def test_visual_qc_photo_checks_and_final_fallback(visual_env):
+    env = visual_env
+    env.scores = [0.1]
+    env.job.meta["images"] = ["own photo"]
+    env.job.p("clips/01.mp4").unlink()
+    env.job.p("final.mp4").write_bytes(b"final")
+    result = visual_qc.check(env.job)
+    assert result["status"] == "passed"
+    assert "unexpected_objects" in result["scores"]
+    assert result["scores"]["visual_defect"]["source"] == "final.mp4"
+
+
+def test_visual_qc_memory_guard_prevents_model_request(visual_env, monkeypatch):
+    env = visual_env
+
+    def insufficient(self):
+        raise RuntimeError("剩餘記憶體 20GB < 40GB，中止")
+
+    monkeypatch.setattr(visual_qc.Comfy, "prepare", insufficient)
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and "40GB" in result["error"]
+    assert env.calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {"answers": None},
+        {"answers": {"child_safety": {"noul": 0.1}}},
+        {"answers": {k: {"noul": 0.1} for k in ("child_safety", "visual_defect", "extra")}},
+    ],
+)
+def test_visual_qc_rejects_incomplete_api_responses(visual_env, monkeypatch, body):
+    env = visual_env
+    monkeypatch.setattr(
+        visual_qc.requests,
+        "post",
+        lambda url, **kw: env.response({} if url.endswith("/api/generate") else body),
+    )
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and result["checked_frames"] == 0
+
+
+@pytest.mark.parametrize("visual_state", ["passed", "flagged", "error"])
+def test_pipeline_qc_requires_visual_completion(tmp_path, monkeypatch, visual_state):
+    from types import SimpleNamespace
+
+    job = SimpleNamespace(dir=tmp_path, p=lambda *p: tmp_path.joinpath(*p), fmt="short", meta={})
+    probe = {
+        "streams": [{"codec_type": "video", "width": 1080, "height": 1920}, {"codec_type": "audio"}],
+        "format": {"duration": "20"},
+    }
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=json.dumps(probe)))
+    monkeypatch.setattr(pipeline, "_measure", lambda *a: {"input_i": -14})
+    monkeypatch.setattr(pipeline, "_ff", lambda *a: "")
+    monkeypatch.setattr(visual_qc, "check", lambda j: {"status": visual_state, "error": "offline"})
+    if visual_state == "error":
+        with pytest.raises(RuntimeError, match="視覺 QC 未完成"):
+            pipeline._qc(job)
+    else:
+        pipeline._qc(job)
+    status = json.loads(job.p("status.json").read_text())
+    assert status["status"] == ("pending_review" if visual_state == "passed" else "failed")
+    assert status["checks"]["visual_qc"] is (visual_state == "passed")
+
+
+@pytest.mark.parametrize(
+    "state,visual,rerun",
+    [
+        ("pending_review", "passed", False),
+        ("failed", "flagged", False),
+        ("approved", "error", False),
+        ("failed", "error", True),
+    ],
+)
+def test_qc_resume_retries_only_incomplete_visual_checks(tmp_path, monkeypatch, state, visual, rerun):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    (tmp_path / "status.json").write_text(json.dumps({"status": state, "visual_qc": {"status": visual}}))
+    job = SimpleNamespace(p=lambda *p: tmp_path.joinpath(*p), timed=lambda stage: nullcontext())
+    calls = []
+    monkeypatch.setattr(pipeline, "_qc", lambda j: calls.append(j))
+    pipeline.qc(job)
+    assert bool(calls) is rerun
+
+
+def test_visual_qc_checks_only_frames_used_in_final_and_reports_final_time(visual_env):
+    env = visual_env
+    env.scores = [0.9]
+    env.job.windows = lambda: [(1, 0.5, 1.0, 10.0)]  # 成片 10 秒處用到素材 0.5～1.0 秒
+    result = visual_qc.check(env.job)
+    assert result["checked_frames"] == 1  # 素材 0 秒那張沒進成片，不查
+    assert result["scores"]["child_safety"] == {
+        "score": 0.9,
+        "source": "clips/01.mp4",
+        "time": 0.5,
+        "final_time": 10.0,
+    }
+
+
+def test_visual_qc_rechecks_when_used_segments_change(visual_env):
+    env = visual_env
+    visual_qc.check(env.job)
+    env.job.windows = lambda: [(1, 0.0, 0.5, 0.0)]  # 重新合成後取用的區段不同
+    visual_qc.check(env.job)
+    assert sum(isinstance(x, dict) for x in env.calls) == 3  # 2 張 + 重查區段內的 1 張
+
+
+def test_visual_qc_threshold_change_recomputes_status_without_rechecking(visual_env, monkeypatch):
+    env = visual_env
+    assert visual_qc.check(env.job)["status"] == "flagged"
+    calls = len(env.calls)
+    monkeypatch.setattr(visual_qc, "THRESHOLD", 0.9)
+    result = visual_qc.check(env.job)
+    assert result["status"] == "passed" and result["threshold"] == 0.9
+    assert len(env.calls) == calls and len(env.prepared) == 1  # 分數沿用，不碰 GPU
+
+
+def test_visual_qc_rechecks_when_sampling_settings_change(visual_env, monkeypatch):
+    env = visual_env
+    visual_qc.check(env.job)
+    monkeypatch.setattr(visual_qc, "STATE", "A different prompt.")
+    visual_qc.check(env.job)
+    assert sum(isinstance(x, dict) for x in env.calls) == 4
+
+
+def test_visual_qc_multi_source_resume_skips_finished_sources(visual_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = visual_env
+    env.job.p("clips/02.mp4").write_bytes(b"clip two")
+    env.job.plan = SimpleNamespace(shots=[SimpleNamespace(id=1), SimpleNamespace(id=2)], layout=[1, 2])
+    env.job.windows = lambda: [(1, 0.0, 1.0, 0.0), (2, 0.0, 1.0, 5.0)]
+    env.fail_at = 2  # 第 3 張（第二支的第一張）失敗
+    assert visual_qc.check(env.job)["status"] == "error"
+    saved = json.loads(env.job.p("visual_qc.json").read_text())
+    assert saved["done"] == ["clips/01.mp4"]
+    env.fail_at = None
+    extracted, real = [], visual_qc.subprocess.run
+    monkeypatch.setattr(
+        visual_qc.subprocess,
+        "run",
+        lambda args, **k: extracted.append(args[args.index("-i") + 1]) or real(args, **k),
+    )
+    result = visual_qc.check(env.job)
+    assert result["checked_frames"] == 4 and extracted == [str(env.job.p("clips/02.mp4"))]  # 不重抽第一支
+    assert result["scores"]["child_safety"]["source"] in ("clips/01.mp4", "clips/02.mp4")
+    assert {f["final_time"] for f in json.loads(env.job.p("visual_qc.json").read_text())["frames"]} == {
+        0.0,
+        0.5,
+        5.0,
+        5.5,
+    }
+
+
+def test_visual_qc_reports_missing_model_by_name(visual_env, monkeypatch):
+    env = visual_env
+    monkeypatch.setattr(visual_qc.requests, "get", lambda *a, **k: env.response({"models": []}))
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and visual_qc.MODEL in result["error"] and env.calls == []
+
+
+def test_visual_qc_error_keeps_ffmpeg_stderr(visual_env, monkeypatch):
+    env = visual_env
+
+    def broken(args, **kwargs):
+        raise visual_qc.subprocess.CalledProcessError(1, args, stderr="moov atom not found")
+
+    monkeypatch.setattr(visual_qc.subprocess, "run", broken)
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and "moov atom not found" in result["error"]
+
+
+def test_visual_qc_errors_when_ffmpeg_extracts_no_frames(visual_env, monkeypatch):
+    env = visual_env
+    monkeypatch.setattr(visual_qc.subprocess, "run", lambda args, **k: None)
+    result = visual_qc.check(env.job)
+    assert result["status"] == "error" and "無法抽取畫面" in result["error"]
+
+
+def test_visual_qc_result_survives_model_unload_failure(visual_env, monkeypatch):
+    env = visual_env
+    post = visual_qc.requests.post
+
+    def flaky(url, json, timeout):
+        if url.endswith("/api/generate"):
+            raise visual_qc.requests.ConnectionError("unload failed")
+        return post(url, json=json, timeout=timeout)
+
+    monkeypatch.setattr(visual_qc.requests, "post", flaky)
+    assert visual_qc.check(env.job)["status"] == "flagged"
+
+
+def _qc_job(tmp_path, monkeypatch, duration):
+    from types import SimpleNamespace
+
+    job = SimpleNamespace(dir=tmp_path, p=lambda *p: tmp_path.joinpath(*p), fmt="short", meta={})
+    probe = {
+        "streams": [{"codec_type": "video", "width": 1080, "height": 1920}, {"codec_type": "audio"}],
+        "format": {"duration": duration},
+    }
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=json.dumps(probe)))
+    monkeypatch.setattr(pipeline, "_measure", lambda *a: {"input_i": -14})
+    monkeypatch.setattr(pipeline, "_ff", lambda *a: "")
+    return job
+
+
+def test_pipeline_qc_skips_gpu_visual_check_when_basic_checks_fail(tmp_path, monkeypatch):
+    job = _qc_job(tmp_path, monkeypatch, "99")  # 超過 short 的長度上限
+
+    def forbidden(j):
+        raise AssertionError("基本檢查失敗時不該啟動視覺檢查")
+
+    monkeypatch.setattr(visual_qc, "check", forbidden)
+    pipeline._qc(job)
+    status = json.loads(job.p("status.json").read_text())
+    assert status["status"] == "failed" and status["visual_qc"]["status"] == "not_checked"
+    assert status["checks"]["visual_qc"] is False and "models" not in job.meta
+
+
+@pytest.mark.parametrize("frames,recorded", [(3, ["clef-flash:9b@sha-1"]), (0, None)])
+def test_pipeline_qc_records_visual_model_digest_only_when_model_was_used(
+    tmp_path, monkeypatch, frames, recorded
+):
+    job = _qc_job(tmp_path, monkeypatch, "20")
+    summary = {"status": "passed", "checked_frames": frames, "model_digest": "sha-1"}
+    monkeypatch.setattr(visual_qc, "check", lambda j: summary)
+    pipeline._qc(job)
+    assert job.meta.get("models", {}).get("visual_qc") == recorded
+
+
+def test_slot_windows_follow_mux_offsets_and_convert_to_seconds(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    (tmp_path / "beats.json").write_text(json.dumps({"cuts": [0, 2, 4, 6], "t0": 0}))
+    job = pipeline.Job.__new__(pipeline.Job)
+    job.dir = tmp_path
+    job.plan = SimpleNamespace(layout=[1, 2, 1], shots=[])
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="5.04"))
+    bounds = pipeline.audio.frame_bounds([0, 2, 4, 6], pipeline.FPS)
+    assert pipeline.slot_windows(job, bounds) == [
+        (1, 0, 48),
+        (2, 0, 48),
+        (1, 24, 48),
+    ]  # 第二次用鏡頭 1 從第 24 幀起
+    assert job.windows() == [(1, 0.0, 2.0, 0.0), (2, 0.0, 2.0, 2.0), (1, 1.0, 3.0, 4.0)]

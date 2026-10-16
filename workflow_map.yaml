@@ -1,0 +1,37 @@
+# 每個欄位 → [[節點 ID, 輸入名], ...]；節點 ID 對應 workflows/*.json
+keyframe:
+  file: workflows/flux_schnell.json
+  fields:
+    prompt: [[pos, text]]
+    seed: [[ks, seed]]
+    width: [[latent, width]]
+    height: [[latent, height]]
+music:
+  file: workflows/ace_step.json
+  fields:
+    tags: [[enc, tags]]
+    lyrics: [[enc, lyrics]]
+    seed: [[enc, seed], [ks, seed]]
+    bpm: [[enc, bpm]]
+    key: [[enc, keyscale]]
+    timesignature: [[enc, timesignature]]
+    duration: [[enc, duration], [latent, seconds]]
+clip:
+  file: workflows/wan22_ti2v_5b.json
+  fields:
+    prompt: [[pos, text]]
+    image: [[img, image]]
+    seed: [[ks, seed]]
+    width: [[lat, width]]
+    height: [[lat, height]]
+    length: [[lat, length]]
+    steps: [[ks, steps]]
+compose:
+  file: workflows/qwen_compose.json
+  fields:
+    prompt: [[pos, prompt]]
+    image1: [[img1, image]]
+    image2: [[img2, image]]
+    seed: [[ks, seed]]
+    width: [[latent, width]]
+    height: [[latent, height]]

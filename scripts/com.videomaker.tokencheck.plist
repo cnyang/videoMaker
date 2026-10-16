@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 每天 09:00 與每次登入時檢查 GX10 的 YouTube token；過期就跳視窗，確認後重新授權並自動複製。
+     安裝：cp 到 ~/Library/LaunchAgents/ 後 launchctl bootstrap gui/$(id -u) <該檔>
+     移除：launchctl bootout gui/$(id -u)/com.videomaker.tokencheck && rm ~/Library/LaunchAgents/com.videomaker.tokencheck.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.videomaker.tokencheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/cnyang/code/temp/videoMaker/.venv/bin/python</string>
+    <string>-m</string><string>videomaker</string><string>renew-token</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/cnyang/code/temp/videoMaker</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string></dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/cnyang/Library/Logs/videomaker-token.log</string>
+  <key>StandardErrorPath</key><string>/Users/cnyang/Library/Logs/videomaker-token.log</string>
+</dict>
+</plist>
