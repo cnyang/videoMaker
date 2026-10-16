@@ -1,5 +1,6 @@
 """視覺 QC 校準用的標記清單（labeling.py）：抽樣規則與盲標頁面；不碰 GPU，ffmpeg 用假的。"""
 
+import hashlib
 import json
 import re
 import subprocess
@@ -16,7 +17,9 @@ def _job(work, name, scores):
         {"source": "clips/01.mp4", "time": i / 2, "final_time": i / 2, "scores": {"child_safety": 0.01, "visual_defect": s}}
         for i, s in enumerate(scores)
     ]  # fmt: skip
-    (d / "visual_qc.json").write_text(json.dumps({"frames": frames, "summary": {}}))
+    digest = hashlib.sha256(b"clip").hexdigest()
+    report = {"frames": frames, "summary": {}, "inputs": [["clips/01.mp4", digest]]}
+    (d / "visual_qc.json").write_text(json.dumps(report))
     (d / "clips").mkdir()
     (d / "clips/01.mp4").write_bytes(b"clip")
     return d
@@ -97,3 +100,30 @@ def test_cli_visual_labels_passes_sizes(tmp_path, monkeypatch, capsys):
     )
     cli.main(["visual-labels", str(tmp_path / "o"), "--top", "10", "--random", "5"])
     assert seen == {"out": tmp_path / "o", "top": 10, "rand": 5} and "7" in capsys.readouterr().out
+
+
+def test_collect_skips_frames_whose_clip_was_regenerated(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(config, "WORK", work)
+    _job(work, "2026-10-15_a", [0.3])
+    changed = _job(work, "2026-10-15_b", [0.4])
+    (changed / "clips/01.mp4").write_bytes(b"regenerated")  # 分數屬於舊鏡頭，不能配新畫面
+    assert [r["job"] for r in labeling.collect()] == ["2026-10-15_a"]
+
+
+def test_each_export_stores_labels_under_its_own_key(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(config, "WORK", work)
+    _job(work, "2026-10-15_a", [0.3, 0.1])
+    _fake_ffmpeg(monkeypatch)
+
+    def key(out):
+        labeling.export(out, top=5, rand=5)
+        return re.search(r'KEY = "(vmk-labels-[0-9a-f]+)"', (out / "index.html").read_text()).group(1)
+
+    first = key(tmp_path / "one")
+    assert key(tmp_path / "same") == first  # 同一批畫面：沿用標記
+    _job(work, "2026-10-16_b", [0.5])
+    assert key(tmp_path / "two") != first  # 換了一批：舊標記不能套到新編號上

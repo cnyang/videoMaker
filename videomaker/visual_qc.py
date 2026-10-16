@@ -262,6 +262,8 @@ def combine(dirs: list[Path]) -> dict:
         state = summary.get("status", "not_checked")
         if summary.get("fps", FPS) != FPS:  # 抽樣率不同，分數本身就不能直接比
             state = "not_checked"
+        if "scores" not in summary and summary.get("threshold", THRESHOLD) != THRESHOLD:
+            state = "not_checked"  # 用別的門檻判的、又沒有分數可依現行門檻重判：不能當通過
         states.append(state)
         out["checked_frames"] += summary.get("checked_frames", 0)
         for key, value in summary.get("scores", {}).items():

@@ -3,6 +3,7 @@
 盲標：標記頁面只顯示畫面，不顯示分數與作業名稱，順序也打亂，避免標記的人被分數影響；分數只存在 manifest.json。
 """
 
+import hashlib
 import json
 import logging
 import random
@@ -36,7 +37,7 @@ _PAGE = """<!doctype html>
 <p class="hint">「有問題」＝ 明顯多餘或融合的肢體、五官壞掉、物體幾何不可能，或不適合 3～8 歲兒童的內容。
 卡通誇張比例、大眼睛不算。畫面只看這一張，不要想它是哪支片。標記存在這個瀏覽器裡，關掉再開會接著標。</p>
 <script>
-const FILES = __FILES__, KEY = "vmk-labels";
+const FILES = __FILES__, KEY = "__KEY__";
 let labels = JSON.parse(localStorage.getItem(KEY) || "{}");
 let i = Math.max(0, FILES.findIndex(f => !labels[f]));
 function go(n) {
@@ -63,10 +64,21 @@ go(i);
 
 
 def collect() -> list[dict]:
-    """work/ 底下所有作業已抽查過的畫面（作業、來源、時間、各項分數）。"""
+    """work/ 底下所有作業已抽查過的畫面（作業、來源、時間、各項分數）。
+    鏡頭檔與評分當時的 sha256（report["inputs"]）不同就略過：分數屬於舊鏡頭，不能配新畫面。"""
     rows = []
     for path in sorted(config.WORK.glob("*/visual_qc.json")):
-        for f in json.loads(path.read_text()).get("frames", []):
+        report = json.loads(path.read_text())
+        scored = dict(map(tuple, report.get("inputs", [])))
+        same = {}
+        for name, digest in scored.items():
+            source = path.parent / name
+            if source.exists():
+                with source.open("rb") as stream:
+                    same[name] = hashlib.file_digest(stream, "sha256").hexdigest() == digest
+        for f in report.get("frames", []):
+            if not same.get(f["source"]):
+                continue
             rows.append(
                 {
                     "job": path.parent.name,
@@ -108,5 +120,8 @@ def export(out: Path, top: int = 40, rand: int = 40) -> int:
             continue
         manifest.append({"id": name, **row})
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-    (out / "index.html").write_text(_PAGE.replace("__FILES__", json.dumps([m["id"] for m in manifest])))
+    # 標記存在瀏覽器 localStorage；key 綁這一批的內容，換一批時舊標記不會套到同編號的新畫面上
+    key = "vmk-labels-" + hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()[:12]
+    page = _PAGE.replace("__FILES__", json.dumps([m["id"] for m in manifest])).replace("__KEY__", key)
+    (out / "index.html").write_text(page)
     return len(manifest)

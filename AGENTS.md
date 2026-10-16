@@ -30,7 +30,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、300 passed（約 25 秒）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-16）：ruff 乾淨、308 passed（約 25 秒）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -98,6 +98,7 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 
 **小知識（trivia，週二、週四）**
 - `Plan.kind`（`kids` 預設／`trivia`）、`facts`（字幕＋`quote`）、`sources`。**來源驗證在 `plan.check_facts`**：quote 必須逐字存在於抓到的條目、字幕數字必須出現在 quote、字幕的實詞必須出現在自己的 quote（`unsupported_words`，啟發式、會擋同義詞；調整虛詞表 `_STOP` 前先看 operations.md 的限制）。只在 `make_plan(article=...)` 套用，舊 plan.json 與合輯 plan 載入不受影響（`weekly` 的合輯 plan 是 `facts=[]`、`sources` 彙整）。
+- 中文名稱來自 `wiki._zh_tw`（中文維基的 zh-tw 變體標題），`plan.check_zh_name` 強制標題與說明欄使用；`SIMPLIFIED` 手寫字表抓不完簡體，別拿它判斷維基標題。`wiki.fetch` 有 `lru_cache`（測試要 `cache_clear()`）。
 - 來源由程式寫進 `plan.sources` 與 YouTube 說明欄，**不要改成採用 LLM 填的網址**；`plan.topic` 由程式覆寫成條目標題（`--resume` 靠 topic 找作業）。
 - 英文字幕在 `pipeline.caption_filters`（ffmpeg `drawtext`，GX10 有、Mac 沒有）；字型走 `VMK_FONT`。`plan.FACTS_PER` 同時決定「支援哪些片型」（short、long，沒有 xl）與每支幾則，`plan.KINDS` 是週五合併與夜間排程共用的「內容種類 → 片型」表。
 - 兒童音樂的呼叫路徑刻意沒變：`new_job` 只在小知識時才把 `article`／`n_facts` 傳給 `make_plan`，`nightly` 只在小知識時才把 `kind` 傳給 `pipeline.run`。`history.jsonl` 的 `kind` 缺省視為 `kids`（舊紀錄）。

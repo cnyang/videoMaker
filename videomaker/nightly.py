@@ -12,12 +12,12 @@ from datetime import datetime, timedelta
 import requests
 
 from . import config, pipeline, wiki
-from .plan import BANNED, FORMATS, SIMPLIFIED, extract_json
+from .plan import BANNED, FORMATS, KINDS, SIMPLIFIED, extract_json
 
 log = logging.getLogger("videomaker")
 # 每晚：短片、長片、5 分鐘各 1 支；由短到長，時間不夠時被略過的是最耗時的 xl
 NIGHT = ["short", "long", "xl"]
-NIGHT_TRIVIA = ["short", "long"]  # 小知識夜：短片與長片（沒有 xl）
+NIGHT_TRIVIA = KINDS["trivia"]  # 小知識夜：支援的片型就是全部（short、long），由 plan.KINDS 統一管理
 PLANS = {"kids": NIGHT, "trivia": NIGHT_TRIVIA}
 SEC_PER_STEP = 17.3  # Wan 5B 單鏡實測：20 步 ≈ 346 秒
 RETRY_WAIT = 600  # 一支失敗後等 10 分鐘再試一次（可能是白天殘留的記憶體占用或暫時性錯誤）
@@ -147,6 +147,8 @@ def suggest_trivia_topics(n: int, avoid: list[str]) -> list[str]:
 
 def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="kids") -> list[dict]:
     plan = plan or PLANS[kind]
+    if bad := [f for f in plan if f not in KINDS[kind]]:  # 確定會失敗的別拿去重試、浪費 10 分鐘與主題
+        raise ValueError(f"{kind} 不支援片型 {bad}（可用 {KINDS[kind]}）")
     dl = deadline_after(datetime.now().astimezone(), deadline)
     topics = (suggest_topics if kind == "kids" else suggest_trivia_topics)(len(plan), _past_topics())
     log.info("今晚主題：%s；deadline %s", topics, dl.strftime("%m-%d %H:%M"))
@@ -179,9 +181,7 @@ def _run_with_retry(topic: str, fmt: str, dl: datetime, sleep, kind: str = "kids
     err = ""
     for attempt in range(2):
         try:
-            job = pipeline.run(
-                topic, fmt=fmt, resume=attempt > 0, **({} if kind == "kids" else {"kind": kind})
-            )
+            job = pipeline.run(topic, fmt=fmt, resume=attempt > 0, kind=kind)
             return {"status": json.loads(job.p("status.json").read_text())["status"], "job": job.dir.name}
         except Exception as e:  # noqa: BLE001 夜間排程不能被單支失敗拖垮：記錄後換下一支
             err = repr(e)

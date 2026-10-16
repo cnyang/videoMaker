@@ -667,6 +667,10 @@ def run(
     fmt: str = "short",
     kind: str = "kids",
 ) -> Job:
+    if (
+        resume and kind == "trivia"
+    ):  # 小知識的 plan.topic 是維基正式標題；輸入 "sea otters" 也要找得到 "Sea otter"
+        topic = wiki.fetch(topic).title
     job = (find_job(topic) if resume else None) or new_job(topic, images, fmt, kind)
     fh = logging.FileHandler(job.p("run.log"), encoding="utf-8")
     log.addHandler(fh)

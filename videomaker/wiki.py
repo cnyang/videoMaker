@@ -5,10 +5,12 @@
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 import requests
 
 API = "https://en.wikipedia.org/w/api.php"
+ZH_API = "https://zh.wikipedia.org/w/api.php"
 HEADERS = {
     "User-Agent": "videoMaker/1.0 (personal educational video project)"
 }  # Wikimedia API 規範要求可辨識的 UA
@@ -22,7 +24,7 @@ class Article:
     url: str
     revid: int
     text: str
-    zh_title: str = ""  # 中文維基的條目名稱（跨語言連結）；可能是簡體，沒有對應條目時為空
+    zh_title: str = ""  # 中文維基條目的台灣正體名稱（zh-tw 變體）；沒有對應條目或查不到時為空
 
     @property
     def permalink(self) -> str:
@@ -30,6 +32,33 @@ class Article:
         return f"{self.url}?oldid={self.revid}"
 
 
+def _zh_tw(title: str) -> str:
+    """中文維基的條目名稱轉台灣正體（MediaWiki 的 varianttitles）。跨語言連結常是簡體（长颈鹿），手寫的簡體字表抓不完。
+    查不到就回空字串：寧可不給中文名稱，也不要把簡體強塞給 LLM。"""
+    if not title:
+        return ""
+    try:
+        r = requests.get(
+            ZH_API,
+            params={
+                "action": "query",
+                "format": "json",
+                "titles": title,
+                "prop": "info",
+                "inprop": "varianttitles",
+            },
+            headers=HEADERS,
+            timeout=30,
+        )
+        r.raise_for_status()
+        page = next(iter(r.json()["query"]["pages"].values()))
+        tw = page.get("varianttitles", {}).get("zh-tw", "")
+    except (requests.RequestException, ValueError, KeyError, StopIteration):
+        return ""
+    return re.sub(r"\s*[（(].*?[）)]", "", tw).strip()  # 去掉消歧義括號
+
+
+@lru_cache(maxsize=64)  # 同一晚選主題與產作業用同一份（同一個版本），也少打一次 API；例外不會被快取
 def fetch(title: str) -> Article:
     """條目不存在、是消歧義頁或內容太短都丟 ValueError；網路錯誤維持 requests 的例外。"""
     r = requests.get(
@@ -59,7 +88,5 @@ def fetch(title: str) -> Article:
     text = page.get("extract", "")
     if len(text) < MIN_CHARS:
         raise ValueError(f"{page['title']} 條目太短（{len(text)} 字元 < {MIN_CHARS}）")
-    zh = re.sub(
-        r"\s*[（(].*?[）)]", "", (page.get("langlinks") or [{}])[0].get("*", "")
-    ).strip()  # 去掉消歧義括號
+    zh = _zh_tw((page.get("langlinks") or [{}])[0].get("*", ""))
     return Article(page["title"], page["fullurl"], page["revisions"][0]["revid"], text[:MAX_CHARS], zh)

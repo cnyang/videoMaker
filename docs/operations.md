@@ -295,9 +295,10 @@ LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消
 
 - **畫面與配樂**：和兒童音樂同一條管線（ACE-Step、FLUX、Wan，同樣的企劃內容規則，角色是條目主題的卡通版）。畫面上的 AI 仍然不准畫字。
 - **英文字幕**：`mux` 時用 ffmpeg `drawtext` 疊上去（程式畫的，不會亂碼），字型預設 GX10 內建的 DejaVu Sans Bold（`VMK_FONT` 可換）。每則 fact 平分時段（`plan.FACTS_PER`：short 2 則約 10 秒一則、long 6 則約 28 秒一則），字幕文字在作業的 `captions/NN.txt`。GX10 的 ffmpeg 有 drawtext，Mac 的沒有，所以本機跑不了含字幕的 `mux`。
+- **中文名稱**：取英文條目的中文跨語言連結，再向中文維基要台灣正體（zh-tw）標題（`长颈鹿` → `長頸鹿`），標題與說明欄必須使用它；查不到就不強制。同一晚選主題與產作業用同一份抓取結果（`wiki.fetch` 有快取），來源版本一致。
 - **YouTube 欄位**：標題與說明維持中英雙語；說明欄最後固定附 `Source: Wikipedia, "<條目>" (<永久連結>), CC BY-SA 4.0.`。上傳照舊一律私人、人工核准、標「為兒童打造」。
 - **片型**：只有 short、long（沒有 xl，也不支援照片模式）。
-- **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱）；先用 `--dry-run` 看企劃。
+- **手動產一支**：`videoMaker make "Sea otter" --kind trivia [--format long]`（`topic` 必須是英文維基百科條目名稱，大小寫、單複數等重新導向都可以；`--resume` 會先換成正式標題再找作業）；先用 `--dry-run` 看企劃。`nightly --kind trivia --plan` 帶了不支援的片型（xl）會直接報錯，不會浪費一次重試。
 - **`meta.json` 與 `plan.json`**：`meta.wikipedia` 記條目標題、永久連結、授權；`plan.kind = "trivia"`、`plan.facts`（字幕與 quote）、`plan.sources`。
 - **限制（人工看片不可省）**：quote 驗證保證「引用的原文存在」，詞彙比對擋下「字幕寫了 quote 沒說的事」（實測抓到過 `eat sea urchins`）；但它是啟發式，抓不到把範圍寫成單一數字、省略但書這類改寫，同義詞改寫也會被擋（所以 LLM 必須沿用 quote 的用詞）。中文標題與說明欄只檢查有沒有用維基的中文名稱，內容沒有驗證。字幕與條目仍要人工對照。維基條目會被編輯，永久連結固定在抓取當時的版本。
 

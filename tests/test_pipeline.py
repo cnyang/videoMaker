@@ -797,7 +797,8 @@ def test_nightly_runs_in_order_skips_when_too_late_and_retries_once(tmp_path, mo
         def p(self, name):
             return self.dir / name
 
-    def fake_run(topic, fmt="short", resume=False):
+    def fake_run(topic, fmt="short", resume=False, kind=None):
+        assert kind == "kids"  # 一律明確傳 kind，不靠預設值
         calls.append((topic, fmt, resume))
         if topic == "乙" and not resume:
             raise RuntimeError("ComfyUI 暫時掛掉")  # 第一次失敗、重試成功
@@ -1803,25 +1804,39 @@ def _facts(n=2):
 def test_wiki_fetch_parses_article_and_rejects_unusable_pages(monkeypatch):
     from videomaker import wiki
 
-    def reply(page):
+    def reply(page, variant=None):
+        wiki.fetch.cache_clear()
+
         class R:
+            def __init__(self, body):
+                self.body = body
+
             def raise_for_status(self): ...
             def json(self):
-                return {"query": {"pages": {"1": page}}}
+                return self.body
 
-        monkeypatch.setattr(wiki.requests, "get", lambda *a, **k: R())
+        def get(url, params=None, **kw):
+            if "zh.wikipedia" in url:  # 中文維基：回台灣正體標題
+                return R(
+                    {"query": {"pages": {"2": {"title": params["titles"], "varianttitles": variant or {}}}}}
+                )
+            return R({"query": {"pages": {"1": page}}})
+
+        monkeypatch.setattr(wiki.requests, "get", get)
 
     good = {
         "title": "Sea otter",
         "fullurl": "https://en.wikipedia.org/wiki/Sea_otter",
         "revisions": [{"revid": 99}],
         "extract": "x" * (wiki.MAX_CHARS + 500),
-        "langlinks": [{"lang": "zh", "*": "海獺 (動物)"}],
+        "langlinks": [{"lang": "zh", "*": "海獭 (动物)"}],
     }
-    reply(good)
+    reply(good, {"zh-tw": "海獺 (動物)"})
     article = wiki.fetch("sea otter")
     assert article.title == "Sea otter" and len(article.text) == wiki.MAX_CHARS
-    assert article.zh_title == "海獺"  # 消歧義括號去掉
+    assert article.zh_title == "海獺"  # 換成台灣正體、去掉消歧義括號
+    reply(good, {})  # 中文維基沒給台灣正體：不給中文名稱，免得把簡體強塞給 LLM
+    assert wiki.fetch("sea otter").zh_title == ""
     reply({k: v for k, v in good.items() if k != "langlinks"})
     assert wiki.fetch("sea otter").zh_title == ""
     assert article.permalink == "https://en.wikipedia.org/wiki/Sea_otter?oldid=99"
@@ -2101,3 +2116,70 @@ def test_restate_recomputes_finished_results_only():
     assert visual_qc.restate({**old, "status": "flagged", "scores": {}})["status"] == "passed"
     for state in ("error", "running", "not_checked"):
         assert visual_qc.restate({"status": state, "scores": scores}) == {"status": state, "scores": scores}
+
+
+def test_wiki_fetch_is_cached_so_one_night_reads_one_revision(monkeypatch):
+    from videomaker import wiki
+
+    wiki.fetch.cache_clear()
+    calls = []
+
+    class R:
+        def raise_for_status(self): ...
+        def json(self):
+            page = {
+                "title": "Giraffe",
+                "fullurl": "u",
+                "revisions": [{"revid": len(calls)}],
+                "extract": "x" * 2000,
+            }
+            return {"query": {"pages": {"1": page}}}
+
+    monkeypatch.setattr(wiki.requests, "get", lambda *a, **k: calls.append(1) or R())
+    assert wiki.fetch("Giraffe") is wiki.fetch("Giraffe") and len(calls) == 1  # 選主題與產作業用同一個版本
+    wiki.fetch.cache_clear()
+
+
+def test_check_zh_name_forces_the_taiwan_name():
+    from videomaker import plan as planmod
+
+    yt = planmod.Youtube(title="海狸小知識｜Sea Otter Facts", description="海狸很可愛", tags=[])
+    with pytest.raises(ValueError, match="海獺"):
+        planmod.check_zh_name(yt, "海獺")
+
+
+def test_unsupported_words_does_not_accept_unrelated_long_words_by_prefix():
+    from videomaker.plan import unsupported_words
+
+    quote = "Sea otters are internal fertilizers found near a carnival of kelp"
+    assert unsupported_words("Sea otters are international swimmers.", quote, "Sea otter") == [
+        "international",
+        "swimmers",
+    ]
+    assert unsupported_words("Sea otters are carnivores.", quote, "Sea otter") == ["carnivores"]
+    assert unsupported_words("Sea otters are found near kelp.", quote, "Sea otter") == []
+    # quote 的字很短（interns，7 字母）也不能讓長字靠前綴通過
+    assert unsupported_words("Sea otters are international.", "Sea otters have interns", "Sea otter") == [
+        "international"
+    ]
+
+
+def test_trivia_resume_finds_the_job_by_canonical_wikipedia_title(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(pipeline.wiki, "fetch", lambda title: _article())  # "sea otters" → "Sea otter"
+    seen = []
+    job = SimpleNamespace(p=lambda *parts: tmp_path.joinpath(*parts))
+    monkeypatch.setattr(pipeline, "find_job", lambda topic: seen.append(topic) or job)
+    monkeypatch.setattr(pipeline, "new_job", lambda *a, **k: pytest.fail("不該重開新作業"))
+    assert pipeline.run("sea otters", dry_run=True, resume=True, kind="trivia") is job
+    assert seen == ["Sea otter"]
+
+
+def test_nightly_rejects_formats_the_kind_does_not_support_before_doing_anything(monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(nightly, "suggest_trivia_topics", lambda n, avoid: pytest.fail("不該先想主題"))
+    with pytest.raises(ValueError, match="xl"):
+        nightly.nightly(["short", "xl"], kind="trivia")
+    assert nightly.PLANS["trivia"] == nightly.KINDS["trivia"]  # 只有一張表

@@ -290,14 +290,16 @@ def _stem(word: str) -> str:
 
 
 def unsupported_words(text: str, quote: str, title: str) -> list[str]:
-    """字幕裡 quote 沒有支持的實詞：4 字母以上、非虛詞，且詞形（去詞尾或前 5 個字母）沒出現在 quote 或條目標題裡。
+    """字幕裡 quote 沒有支持的實詞：4 字母以上、非虛詞，且詞形沒出現在 quote 或條目標題裡。
+    詞形比對：去詞尾相同，或兩字都不超過 7 個字母且前 5 個字母相同（densest／dense）；
+    長字不用前綴，否則 international 會因 internal 通過、carnivores 會因 carnival 通過。
     啟發式：字幕只能寫 quote 說的事；同義詞改寫也會被擋，所以要求 LLM 沿用 quote 的用詞。"""
     support = re.findall(r"[a-z]+", f"{quote} {title}".lower())
-    stems, heads = {_stem(t) for t in support}, {t[:5] for t in support}
+    stems, heads = {_stem(t) for t in support}, {t[:5] for t in support if len(t) <= 7}
     return [
         w
         for w in dict.fromkeys(re.findall(r"[a-z]+", text.lower()))
-        if len(w) >= 4 and w not in _STOP and _stem(w) not in stems and w[:5] not in heads
+        if len(w) >= 4 and w not in _STOP and _stem(w) not in stems and not (len(w) <= 7 and w[:5] in heads)
     ]
 
 
@@ -327,8 +329,8 @@ def check_facts(facts: list[Fact], article: Article, n: int) -> None:
 
 
 def check_zh_name(yt: Youtube, zh: str) -> None:
-    """維基跨語言連結給的中文名稱若是繁體，標題與說明欄的中文必須用它：LLM 憑記憶常把冷門主題翻錯（sea otter 寫成海狸）。
-    簡體的只當提示給 LLM，不強制。"""
+    """標題與說明欄的中文必須用維基的台灣正體名稱（wiki._zh_tw 轉好的）：LLM 憑記憶常把冷門主題翻錯（sea otter 寫成海狸）。
+    名稱仍含簡體字表裡的字時不強制（多一道保險）。"""
     if zh and not SIMPLIFIED.search(zh) and (zh not in yt.title or zh not in yt.description):
         raise ValueError(f"youtube.title 與 youtube.description 的中文必須使用這個主題的中文名稱「{zh}」")
 

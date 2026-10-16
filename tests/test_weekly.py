@@ -270,3 +270,14 @@ def test_combine_judges_sources_by_current_threshold_not_the_one_they_were_check
 
     assert source("passed", 0.3) == "flagged"  # 以舊的 50% 門檻通過，但按現行 20% 門檻要標有疑慮
     assert source("flagged", 0.1) == "passed"  # 分數低於現行門檻，不再算有疑慮
+
+
+def test_combine_does_not_trust_old_threshold_results_without_scores(work):
+    first = _job(work, "2026-10-12_a", "short", "甲", 4)
+    second = _job(work, "2026-10-13_b", "short", "乙", 3)
+    (second / "status.json").write_text(
+        json.dumps({"status": "approved", "visual_qc": {"status": "passed", "threshold": 0.5}})
+    )
+    assert (
+        weekly.visual_qc.combine([first, second])["status"] == "not_checked"
+    )  # 沒有分數，無法依現行門檻重判
