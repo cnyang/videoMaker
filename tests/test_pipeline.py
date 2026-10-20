@@ -790,18 +790,6 @@ def test_topic_requests_use_model_for_kind(monkeypatch, kind):
     assert calls == [f"{kind}-model"]
 
 
-@pytest.fixture
-def nemotron_script():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "deploy_nemotron", config.ROOT / "scripts/deploy_nemotron.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 @pytest.mark.parametrize("override", [False, True])
 def test_plan_models_follow_topic_configuration(monkeypatch, override):
     import runpy
@@ -853,47 +841,6 @@ def test_topics_and_plans_share_model_and_record_actual_model(tmp_path, monkeypa
     model = override or topic_model
     assert calls == [topic_model, model, model]
     assert job.meta["llm"] == json.loads(job.p("meta.json").read_text())["llm"] == model
-
-
-@pytest.mark.parametrize("busy", ["comfy", "ollama"])
-def test_nemotron_preserves_busy_services(monkeypatch, nemotron_script, busy):
-    calls = []
-
-    def api(url, data=None):
-        calls.append(url)
-        if url.endswith("/queue"):
-            return {"queue_running": [1] if busy == "comfy" else [], "queue_pending": []}
-        return {"models": [{"name": "in-use"}]}
-
-    monkeypatch.setattr(nemotron_script, "api", api)
-    with pytest.raises(RuntimeError, match="保留原狀"):
-        nemotron_script.prepare_gpu()
-    assert not any(url.endswith("/free") for url in calls)
-
-
-def test_nemotron_aborts_when_memory_is_low(monkeypatch, nemotron_script):
-    monkeypatch.setattr(nemotron_script, "available_gb", lambda: 39)
-    with pytest.raises(RuntimeError, match="40GiB"):
-        nemotron_script.ensure_memory()
-
-
-@pytest.mark.parametrize("image_answer", ["blue", "red", ""])
-def test_nemotron_verifies_actual_image_answer(monkeypatch, nemotron_script, image_answer):
-    calls = []
-
-    def api(url, data, timeout):
-        calls.append(data)
-        answer = "4" if len(calls) == 1 else image_answer
-        return {"choices": [{"finish_reason": "stop", "message": {"content": answer}}]}
-
-    monkeypatch.setattr(nemotron_script, "api", api)
-    if image_answer == "blue":
-        assert nemotron_script.verify() == {"text": "4", "image": "blue"}
-    else:
-        with pytest.raises(RuntimeError, match="image 推論驗證失敗"):
-            nemotron_script.verify()
-    content = calls[1]["messages"][0]["content"]
-    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 def test_suggest_topics_filters_duplicates_and_retries(monkeypatch):

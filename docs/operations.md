@@ -497,29 +497,6 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 - 設定的 workflow 是 ComfyUI API 格式，放在 `workflows/*.json`；要替換的節點欄位記在 `workflow_map.yaml`。
 - GX10 沒有 git repo（rsync 不帶 `.git`），所以 `meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`。
 
-### Nemotron 獨立部署（不接入產片管線）
-
-2026-10-16 使用者放行 `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`，安排台北時間當日 23:00 由 GX10 的 `at` 執行 `scripts/deploy_nemotron.py`。腳本固定模型 revision 與官方 GB10 nightly 的 ARM64 Docker digest，不修改 Ollama、ComfyUI 或產片模型；未使用額外 drafter。
-
-- `python3 scripts/deploy_nemotron.py --check` 只檢查架構、Docker、磁碟與連接埠，不下載或使用 GPU。
-- 排程全程持有 `/tmp/vmk-nightly.lock`，先下載約 75GB 權重，再準備 GPU；ComfyUI 有佇列、Ollama 有模型常駐、記憶體不足就中止，不停止既有服務。只會釋放閒置 ComfyUI 的模型快取。
-- 推論使用 8K context、單一請求、最多一張圖片、1GiB KV cache、關閉 CUDA graph；啟動期間與推論前後檢查至少 40GiB 可用記憶體，低於門檻即停止。這是基本相容性驗證，不是效能基準。
-- 文字算術與合成藍色圖片都答對才記為 `passed`；結果在 `~/code/nemotron-3.5-super-vl/install-result.json`，完整執行日誌在專案 `log/nemotron-install-20261016.log`。排程最多執行 8 小時。
-- 驗證後停止新建的推論容器以釋放 GPU，保留權重與容器；不自動啟動、不接影片管線。失敗時也保留檔案與容器供查錯。
-
-```bash
-# 檢查排程／部署結果（尚未執行前不會有結果檔）
-ssh gx10 atq
-ssh gx10 'cat ~/code/nemotron-3.5-super-vl/install-result.json'
-ssh gx10 'tail -60 ~/code/videoMaker/log/nemotron-install-20261016.log'
-
-# 成功部署後，確認沒有產片、Ollama 模型或其他 GPU 工作，且有足夠記憶體再手動啟動
-ssh gx10 docker start vmk-nemotron-3-5-super-vl
-# 模型名稱 nemotron-3.5-super-vl；只綁 GX10 的 localhost，需等服務完成載入
-ssh gx10 'curl --fail http://127.0.0.1:8000/v1/models'
-ssh gx10 docker stop vmk-nemotron-3-5-super-vl
-```
-
 ---
 
 ## 疑難排解
