@@ -61,6 +61,7 @@ class Comfy:
     def __init__(self, url: str = config.COMFY_URL):
         self.url = url.rstrip("/")
         self.client_id = uuid.uuid4().hex
+        self.last_outputs: dict = {}  # 最近一次 run() 的 history outputs（如 FLUX.3 upsampler 擴寫後的 caption）
 
     def _req(self, method, path, retries=3, timeout=60, **kw):
         for i in range(retries):
@@ -72,16 +73,18 @@ class Comfy:
                     raise ComfyError(f"連不上 ComfyUI {self.url}") from e
                 time.sleep(2**i)
 
-    def ensure_memory(self, wait: float = 0):
-        """統一記憶體會與其他模型爭用：不足就中止，不硬跑。wait > 0 時最多等這麼多秒（/free 是非同步的）。"""
+    def ensure_memory(self, wait: float = 0, extra_gb: float = 0):
+        """統一記憶體會與其他模型爭用：不足就中止，不硬跑。wait > 0 時最多等這麼多秒（/free 是非同步的）。
+        門檻 = VMK_MIN_FREE_GB + extra_gb；extra_gb 給單一階段吃得比 Wan 多的情況，基準門檻不會被降低。"""
+        floor = config.MIN_FREE_GB + extra_gb
         deadline = time.monotonic() + wait
         while True:
             free_gb = self._req("GET", "/system_stats").json()["system"]["ram_free"] / 2**30
-            if free_gb >= config.MIN_FREE_GB:
+            if free_gb >= floor:
                 log.info("剩餘記憶體 %.0fGB", free_gb)
                 return
             if time.monotonic() >= deadline:
-                raise ComfyError(f"剩餘記憶體 {free_gb:.0f}GB < {config.MIN_FREE_GB:.0f}GB，中止")
+                raise ComfyError(f"剩餘記憶體 {free_gb:.0f}GB < {floor:.0f}GB，中止")
             time.sleep(3)
 
     def free(self):
@@ -92,10 +95,10 @@ class Comfy:
                 return
         log.warning("/free 與 /api/free 都失敗（%s），略過", r.status_code)
 
-    def prepare(self):
+    def prepare(self, extra_gb: float = 0):
         """每個 GPU 階段開始前：先卸載 ComfyUI 殘留的模型，再檢查記憶體（順序不能反，否則會被自己上一階段擋住）。"""
         self.free()
-        self.ensure_memory(wait=30)
+        self.ensure_memory(wait=30, extra_gb=extra_gb)
 
     def upload(self, path: Path, name: str) -> str:
         with open(path, "rb") as f:
@@ -119,6 +122,7 @@ class Comfy:
                 msgs = [m[1] for m in st["messages"] if m[0] == "execution_error"]
                 raise ComfyError(f"執行失敗 {pid}: {msgs or st}")
             if st.get("completed"):
+                self.last_outputs = h["outputs"]
                 return self._fetch(h["outputs"], dest)
         self._req("POST", "/interrupt")
         raise ComfyError(f"逾時 {timeout}s，已送 /interrupt：{pid}")

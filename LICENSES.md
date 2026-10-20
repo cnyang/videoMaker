@@ -46,6 +46,18 @@ NAS `/volume1/comfyUI-model` 內的 MiniMax H3、LTX-2.3、FLUX.2 檔案**不得
 來源證據：GX10 上這三個檔案的 sha256 與 HF `Comfy-Org` 官方檔案**完全相同**（diffusion `318568f6…`、text encoder `cb5636d8…`、vae `a70580f0…`）。
 **不使用** `Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`：其上游 `lightx2v/Qwen-Image-Edit-2509-Lightning` 未標示授權。
 
+## 白名單外、經使用者明確放行（2026-10-20）
+
+| 用途 | 模型／檔案 | 授權 | 核對依據 |
+|---|---|---|---|
+| 兒童音樂的關鍵幀（小知識仍用 FLUX.1 schnell） | FLUX.3 Image Klein → `flux3-image-klein-bf16.safetensors`（`black-forest-labs/flux-3-image-klein-comfy`） | **FLUX Kommunity License v1.0**（不是 Apache） | [LICENSE.md](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md)；重新打包頁標同一授權。非商用人人可用；商用限「合格使用者」＝本人含關係企業的年營收低於 US$5M（使用者 2026-10-20 確認：頻道要營利、年營收一定低於 US$5M）。輸出可商用且不算衍生作品；義務：發布前過濾或審查輸出（本管線有人工核准）、法規要求時標示 AI 生成。禁止：用輸出訓練功能相近的模型、侵害肖像權或數位替身權、監控與軍事用途等。**營收達 US$5M 時必須停用或另取授權** |
+| 同上 | 文字編碼器 `qwen3vl_4b_bf16.safetensors`（Qwen3-VL-4B-Instruct） | Apache 2.0 | HF `flux-3-image-klein` 的 `text_encoder/LICENSE`、重新打包頁皆標 Apache-2.0 |
+| 同上（官方要求搭配，不用則結果明顯較弱） | prompt upsampler `qwen3.5_9b_flux3_prompt_upsampler_bf16.safetensors`（Qwen3.5-9B 微調） | Apache 2.0 | HF `black-forest-labs/flux-3-image-klein-pup` 標 apache-2.0，基底 Qwen3.5-9B 亦為 Apache 2.0 |
+| 同上 | `flux2-vae.safetensors` | 重新打包頁未單獨標示，視同隨 repo 的 Kommunity License 處理 | 檔名雖叫 flux2-vae，取自 `flux-3-image-klein-comfy/vae/`；**下方禁用的 NAS FLUX.2 檔案仍不得使用** |
+
+來源證據：GX10 上四個檔案的大小與 HF 檔案**完全相同**（11097404512、8875719408、18819722392、336211292 位元組），下載腳本當時已比對 HF 的 sha256（不符會改名 `.bad`，目前沒有殘留）；HF API 對此 repo 遮蔽 LFS hash，無法事後重新比對。GX10 實測 sha256：diffusion `c3e9813c…`、text encoder `f0b24fc5…`、vae `868fe7b3…`、upsampler `f5062a1f…`。
+逐支影片實際使用的檔名與 upsampler 擴寫後的 caption 見該支 `meta.json` 的 `models.keyframes` 與 `shots[].upsampled`。
+
 ## 視覺 QC（2026-10-15，經使用者明確放行並接入管線）
 
 | 用途 | 模型／檔案 | 授權 | 核對依據 |

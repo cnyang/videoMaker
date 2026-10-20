@@ -241,6 +241,11 @@ def test_workflows_match_live_object_info():
         for nid, node in json.loads(f.read_text()).items():
             spec = info[node["class_type"]]["input"]
             known = set(spec["required"]) | set(spec.get("optional", {}))
+            # 動態 combo（如 TextGenerate 的 sampling_mode）會依選到的選項多出 "<名稱>.<子欄位>" 輸入
+            for name, (kind, *opt) in {**spec["required"], **spec.get("optional", {})}.items():
+                if kind == "COMFY_DYNAMICCOMBO_V3":
+                    chosen = next(o for o in opt[0]["options"] if o["key"] == node["inputs"].get(name))
+                    known |= {f"{name}.{k}" for group in chosen["inputs"].values() for k in group}
             given = set(node["inputs"])
             assert given <= known, f"{f.name}:{nid} 未知輸入 {given - known}"
             assert set(spec["required"]) <= given, f"{f.name}:{nid} 缺必填 {set(spec['required']) - given}"
@@ -457,6 +462,69 @@ def test_prepare_frees_before_checking_memory(monkeypatch):
         c.prepare()
 
 
+def test_prepare_extra_gb_raises_the_memory_floor(monkeypatch):
+    """FLUX.3＋upsampler 實測比 Wan 多吃約 8GB（峰值 37.4 對 29.6GB）：門檻 = VMK_MIN_FREE_GB + extra_gb，基準不被降低。"""
+    from videomaker.comfy import Comfy, ComfyError
+
+    class R:
+        ok = True
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    c = Comfy("http://x")
+    monkeypatch.setattr(config, "MIN_FREE_GB", 40.0)
+    monkeypatch.setattr(
+        c,
+        "_req",
+        lambda m, p, **kw: R({"system": {"ram_free": 45 * 2**30}}) if p == "/system_stats" else R({}),
+    )
+    monkeypatch.setattr("videomaker.comfy.time.monotonic", iter(range(0, 1000, 20)).__next__)
+    c.prepare()  # 45GB ≥ 40GB：Wan 等一般階段照常通過
+    with pytest.raises(ComfyError, match="48GB"):
+        c.prepare(extra_gb=8)  # 45GB < 48GB：FLUX.3 階段中止
+
+
+def test_flux3_keyframes_ask_for_extra_memory_but_schnell_does_not(tmp_path, monkeypatch):
+    asked = {}
+
+    class FakeComfy:
+        def __init__(self):
+            self.last_outputs = {}
+
+        def prepare(self, extra_gb=0):
+            asked["extra_gb"] = extra_gb
+
+        def free(self): ...
+
+        def run(self, wf, dest, timeout):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _png(dest)
+
+    monkeypatch.setattr(pipeline, "Comfy", FakeComfy)
+    for kind, expected in (("kids", pipeline.FLUX3_EXTRA_GB), ("trivia", 0)):
+        d = tmp_path / kind
+        d.mkdir()
+        plan = {
+            "topic": "t",
+            "slug": "t",
+            "kind": kind,
+            "style": "s",
+            "character": "a round brown bear cub with a red scarf",
+            "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+            "seed": 7,
+            "shots": [{"id": i, "prompt": "p"} for i in range(1, 6)],
+        }
+        (d / "plan.json").write_text(json.dumps(plan))
+        (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}}))
+        pipeline.keyframes(pipeline.Job(d))
+        assert asked["extra_gb"] == expected
+    assert pipeline.FLUX3_EXTRA_GB == 8
+
+
 def test_plan_roundtrip_with_empty_style_and_character(tmp_path):
     """照片模式把 style/character 清空後存成 plan.json，重新載入必須成功（Job 每階段都會重新載入）。"""
     plan = Plan.model_validate(
@@ -474,8 +542,8 @@ def test_plan_roundtrip_with_empty_style_and_character(tmp_path):
     assert again.character == "" and again.full_prompt(again.shots[0]) == "p"
 
 
-def _png(path, w=704, h=1280, bars=0):
-    vf = f"pad=iw:ih+{2 * bars}:0:{bars}:black" if bars else "null"
+def _png(path, w=704, h=1280, bars=0, color="black"):
+    vf = f"pad=iw:ih+{2 * bars}:0:{bars}:{color}" if bars else "null"
     _ff(
         "-f",
         "lavfi",
@@ -496,11 +564,35 @@ def test_has_black_bars_detects_letterbox(tmp_path):
     assert pipeline._has_black_bars(tmp_path / "bars.png", 704, 1280)
 
 
+def test_has_white_bars_detects_letterbox_but_not_white_background(tmp_path):
+    """FLUX.3 不用 upsampler 時實測會出現上下白帶；白色背景（主體沒有橫跨整張寬）不能誤判。"""
+    _png(tmp_path / "bars.png", bars=298, color="white")  # 與實測 crop=704:684:0:298 同量級
+    _png(tmp_path / "ok.png")
+    # 白底、中間一塊不到整張寬的主體：裁切後寬度會縮水，不是 letterbox
+    pipeline._ff(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=704x1280",
+        "-vf",
+        "drawbox=x=150:y=300:w=400:h=700:color=red:t=fill",
+        "-frames:v",
+        1,
+        tmp_path / "white_bg.png",
+    )
+    assert pipeline._has_white_bars(tmp_path / "bars.png", 704, 1280)
+    assert not pipeline._has_white_bars(tmp_path / "ok.png", 704, 1280)
+    assert not pipeline._has_white_bars(tmp_path / "white_bg.png", 704, 1280)
+
+
 def test_keyframes_regenerate_with_new_seed_when_black_bars(tmp_path, monkeypatch):
     seeds = []
 
     class FakeComfy:
-        def prepare(self): ...
+        def __init__(self):
+            self.last_outputs = {}
+
+        def prepare(self, extra_gb=0): ...
         def free(self): ...
 
         def run(self, wf, dest, timeout):
@@ -529,6 +621,66 @@ def test_keyframes_regenerate_with_new_seed_when_black_bars(tmp_path, monkeypatc
     assert len(seeds) == 6  # 其餘 4 鏡各 1 次
     assert job.meta["shots"]["1"]["seed"] == 1008  # meta 記錄實際使用的 seed
     assert not pipeline._has_black_bars(d / "keyframes" / "01.png", 704, 1280)
+
+
+@pytest.mark.parametrize(
+    ("kind", "first_node", "model"),
+    [
+        ("kids", "pup", "flux3-image-klein-bf16.safetensors"),
+        ("trivia", "pos", "flux1-schnell-fp8.safetensors"),
+    ],
+)
+def test_keyframes_workflow_by_kind(tmp_path, monkeypatch, kind, first_node, model):
+    """兒童音樂用 FLUX.3＋upsampler（擴寫後的 caption 要進 meta 當授權證據）；小知識維持 schnell。"""
+    sent = []
+
+    class FakeComfy:
+        def prepare(self, extra_gb=0): ...
+        def free(self): ...
+
+        def run(self, wf, dest, timeout):
+            sent.append(wf)
+            # 與真正的 ComfyUI 一致：只有帶 upsampler 的 workflow 才有 pup_text 輸出
+            self.last_outputs = (
+                {"pup_text": {"text": ["Full-color photograph of a bear"]}} if "pup" in wf else {}
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _png(dest)
+
+    monkeypatch.setattr(pipeline, "Comfy", FakeComfy)
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = tmp_path / "job"
+    d.mkdir()
+    plan = {
+        "topic": "t",
+        "slug": "t",
+        "kind": kind,
+        "style": "s",
+        "character": "a round brown bear cub with a red scarf",
+        "music": {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"},
+        "seed": 7,
+        "shots": [{"id": i, "prompt": "p"} for i in range(1, 6)],
+    }
+    (d / "plan.json").write_text(json.dumps(plan))
+    (d / "meta.json").write_text(json.dumps({"timings": {}, "models": {}, "shots": {}}))
+    job = pipeline.Job(d)
+    pipeline.keyframes(job)
+    assert ("pup" in sent[0]) == (kind == "kids")  # 只有 FLUX.3 的 workflow 有 upsampler 節點
+    if kind == "kids":
+        assert sent[0]["pup"]["inputs"]["prompt"] == job.plan.full_prompt(job.plan.shots[0])
+        assert job.meta["shots"]["1"]["upsampled"] == "Full-color photograph of a bear"
+    else:
+        assert "upsampled" not in job.meta["shots"]["1"]
+    assert model in job.meta["models"]["keyframes"]
+
+
+def test_estimate_keyframes_slower_for_kids(monkeypatch):
+    """兒童音樂的關鍵幀改用 FLUX.3＋upsampler（實測約 35–42 秒/張），預估要比小知識（schnell）長。"""
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "STEPS", 20)
+    assert nightly.estimate("short", "kids") > nightly.estimate("short", "trivia")
+    assert nightly.estimate("short") == nightly.estimate("short", "kids")  # 預設仍是兒童音樂
 
 
 def test_bench_counts_only_jobs_that_finished_qc(tmp_path, monkeypatch):
@@ -897,6 +1049,9 @@ def test_nightly_runs_in_order_skips_when_too_late_and_retries_once(tmp_path, mo
         return FakeJob(topic)
 
     monkeypatch.setattr(nightly.pipeline, "run", fake_run)
+    monkeypatch.setattr(
+        nightly, "gpu_temp", lambda: None
+    )  # 不依賴真實 GPU 溫度：GPU 還熱時 wait_cool 會多呼叫 sleep
     sleeps = []
     in_55_min = (datetime.now().astimezone() + timedelta(minutes=55)).strftime("%H:%M")
     res = nightly.nightly(["short", "short", "long"], in_55_min, sleep=sleeps.append)
@@ -2454,7 +2609,7 @@ def test_retry_does_not_start_when_cooling_used_up_remaining_time(monkeypatch):
         Clock.current += timedelta(seconds=seconds)
 
     monkeypatch.setattr(nightly, "datetime", Clock)
-    monkeypatch.setattr(nightly, "estimate", lambda fmt: 1800)
+    monkeypatch.setattr(nightly, "estimate", lambda fmt, kind="kids": 1800)
     monkeypatch.setattr(nightly, "gpu_temp", lambda: 85)
     monkeypatch.setattr(nightly.pipeline, "run", fail)
     result = nightly._run_with_retry("t", "short", datetime.fromisoformat("2026-10-16T07:00:00+08:00"), sleep)

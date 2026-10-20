@@ -378,7 +378,7 @@ launchctl bootout gui/$(id -u)/com.videomaker.tokencheck && rm ~/Library/LaunchA
 | `VMK_KIDS_TOPIC_MODEL` | `qwen3.8:27b` | 兒童音樂的主題與分鏡企劃共用模型，手動 `make` 也適用 |
 | `VMK_TRIVIA_TOPIC_MODEL` | `gemma4:31b` | 小知識的主題與分鏡企劃共用模型，手動 `make --kind trivia` 也適用；維基百科來源驗證照常執行 |
 | `VMK_WORK` | `<專案>/work` | 作業資料夾根目錄 |
-| `VMK_MIN_FREE_GB` | `40` | 統一記憶體剩餘低於此值就中止該階段 |
+| `VMK_MIN_FREE_GB` | `40` | 統一記憶體剩餘低於此值就中止該階段。兒童音樂的 FLUX.3 關鍵幀階段多要 `pipeline.FLUX3_EXTRA_GB`（8GB，即預設 48GB）：2026-10-20 實測相對基線的記憶體峰值 FLUX.3＋upsampler 37.4GB、Wan 29.6GB，8GB 是兩者差距，讓兩個階段都保有約 10GB 餘裕 |
 | `VMK_COOL_TEMP` | `45` | 夜間排程每支開跑前，GPU 要降到此溫度（°C）以下才開始；閒置實測約 36-37°C |
 | `VMK_FONT` | `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf` | 小知識英文字幕用的 TTF；檔案不存在時 `mux` 會直接報錯 |
 | `VMK_STEPS` | `20` | Wan 取樣步數。實測 40 步與 20 步細節看不出差別，卻慢 1.85 倍，所以維持 20 |
@@ -458,7 +458,8 @@ rsync -a gx10:code/videoMaker/labels/ ~/Downloads/videoMaker-labels/ && open ~/D
 | 用途 | 模型 | 檔名 |
 |---|---|---|
 | 音樂 | ACE-Step 1.5 | `ace_step_1.5_turbo_aio.safetensors` |
-| 關鍵幀 | FLUX.1 schnell | `flux1-schnell-fp8.safetensors` |
+| 關鍵幀（小知識） | FLUX.1 schnell | `flux1-schnell-fp8.safetensors` |
+| 關鍵幀（兒童音樂，白名單外，你於 2026-10-20 明確放行；FLUX Kommunity License，年營收須低於 US$5M） | FLUX.3 Image Klein + prompt upsampler | `flux3-image-klein-bf16.safetensors`、`qwen3vl_4b_bf16.safetensors`、`qwen3.5_9b_flux3_prompt_upsampler_bf16.safetensors`、`flux2-vae.safetensors`（約 38GB；upsampler 一定要用，擴寫後的 caption 記在 `meta.json` 的 `shots[].upsampled`） |
 | 影片 | Wan 2.2 TI2V-5B | `wan2.2_ti2v_5B_fp16.safetensors`、`umt5_xxl_fp8_e4m3fn_scaled.safetensors`、`wan2.2_vae.safetensors` |
 | 兩隻狗合成（白名單外，你於 2026-10-05 明確放行） | Qwen-Image-Edit-2509 | `qwen_image_edit_2509_fp8_e4m3fn.safetensors`、`qwen_2.5_vl_7b_fp8_scaled.safetensors`（7B，不可換 3B／72B）、`qwen_image_vae.safetensors` |
 
@@ -496,6 +497,8 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 - 套件新增依賴後，GX10 的 venv 要手動 `pip install`（例如 `google-api-python-client`、`google-auth-oauthlib` 已裝）。
 - 設定的 workflow 是 ComfyUI API 格式，放在 `workflows/*.json`；要替換的節點欄位記在 `workflow_map.yaml`。
 - GX10 沒有 git repo（rsync 不帶 `.git`），所以 `meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`。
+- **ComfyUI 版本釘在 v0.41.3**（2026-10-20 由 v0.33.0 升級，為了 FLUX.3 的 `CLIPLoader type=flux3`）：`~/code/comfyui-docker/Dockerfile` 的 `ARG COMFY_REF`，要升級就改它再 `docker compose build && docker compose up -d`（先確認佇列空、不在夜間時段）。回滾：把 `comfyui-docker-comfyui:pre-flux3-20261020` 標回 `latest` 後 `docker compose up -d`。`custom_nodes/ComfyUI-LTXVideo` 在新版 import 失敗，LTX 本來就在禁用清單、沒有 workflow 用到，不用修。
+- `test_workflows_match_live_object_info` 會展開動態 combo（`TextGenerate` 的 `sampling_mode.*` 子欄位）。
 
 ---
 
@@ -503,7 +506,7 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 
 | 現象 | 原因與處理 |
 |---|---|
-| `剩餘記憶體 NGB < 40GB，中止` | 統一記憶體被別的工作占用（例如另一個 ComfyUI 任務）。每個 GPU 階段開始前會先卸載模型並最多等 30 秒。夜間任務會等 10 分鐘重試一次；手動跑則等別的工作結束再跑。**不要降低 `VMK_MIN_FREE_GB` 硬跑** |
+| `剩餘記憶體 NGB < 40GB，中止`（兒童音樂關鍵幀階段是 48GB） | 統一記憶體被別的工作占用（例如另一個 ComfyUI 任務）。每個 GPU 階段開始前會先卸載模型並最多等 30 秒。夜間任務會等 10 分鐘重試一次；手動跑則等別的工作結束再跑。**不要降低 `VMK_MIN_FREE_GB` 硬跑** |
 | `連不上 ComfyUI` | `ssh gx10 'docker ps \| grep comfyui'`；容器沒起來就啟動它 |
 | `… 必須先人工核准（videomaker approve）才能上傳` | 還沒 `videoMaker approve <資料夾>` |
 | 上傳報 `invalid_grant` | token 過期，跑 `uv run python -m videomaker renew-token` |

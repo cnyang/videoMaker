@@ -20,6 +20,8 @@ NIGHT = ["short", "long", "xl"]
 NIGHT_TRIVIA = KINDS["trivia"]  # 小知識夜：支援的片型就是全部（short、long），由 plan.KINDS 統一管理
 PLANS = {"kids": NIGHT, "trivia": NIGHT_TRIVIA}
 SEC_PER_STEP = 17.3  # Wan 5B 單鏡實測：20 步 ≈ 346 秒
+# 每個獨特鏡頭的關鍵幀秒數：兒童音樂 FLUX.3 + upsampler 實測 14 鏡 466 秒 ≈ 33 秒/張（含載入）；小知識 schnell 約 12 秒
+KEYFRAME_SEC = {"kids": 35, "trivia": 12}
 RETRY_WAIT = 600  # 一支失敗後等 10 分鐘再試一次（可能是白天殘留的記憶體占用或暫時性錯誤）
 COOL_POLL = 30  # 等降溫時每 30 秒量一次 GPU 溫度
 
@@ -49,10 +51,11 @@ def wait_cool(latest_start: datetime, sleep=time.sleep) -> None:
         t = gpu_temp()
 
 
-def estimate(fmt: str) -> float:
+def estimate(fmt: str, kind: str = "kids") -> float:
     """預估一支要多久（秒，含 15% 餘裕）：生成、視覺抽查與載入、企劃、音樂、關鍵幀、合成。"""
     unique = FORMATS[fmt]["unique"] or 5
-    return (unique * (SEC_PER_STEP * config.STEPS + 12) + 30 + (180 if fmt == "short" else 600)) * 1.15
+    key_sec = KEYFRAME_SEC[kind]
+    return (unique * (SEC_PER_STEP * config.STEPS + key_sec) + 30 + (180 if fmt == "short" else 600)) * 1.15
 
 
 def deadline_after(now: datetime, hhmm: str) -> datetime:
@@ -164,10 +167,10 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="
             "kind": kind,  # 週五合併靠它把兒童音樂與小知識分開
         }
         if not dry_run:
-            wait_cool(dl - timedelta(seconds=estimate(fmt)), sleep)  # 每支開跑前先等 GPU 降溫
-        if datetime.now().astimezone() + timedelta(seconds=estimate(fmt)) > dl:
+            wait_cool(dl - timedelta(seconds=estimate(fmt, kind)), sleep)  # 每支開跑前先等 GPU 降溫
+        if datetime.now().astimezone() + timedelta(seconds=estimate(fmt, kind)) > dl:
             entry["status"] = "skipped"  # 預估來不來得及：不硬跑，避免拖到白天占用 GPU
-            log.warning("[%s] %s 預估 %.0f 分鐘，趕不上 deadline，略過", fmt, topic, estimate(fmt) / 60)
+            log.warning("[%s] %s 預估 %.0f 分鐘，趕不上 deadline，略過", fmt, topic, estimate(fmt, kind) / 60)
         elif dry_run:
             entry["status"] = "dry-run"
         else:
@@ -190,10 +193,10 @@ def _run_with_retry(topic: str, fmt: str, dl: datetime, sleep, kind: str = "kids
             err = repr(e)
             log.error("[%s] %s 第 %d 次失敗：%s", fmt, topic, attempt + 1, err)
             if attempt == 0:
-                if datetime.now().astimezone() + timedelta(seconds=RETRY_WAIT + estimate(fmt)) > dl:
+                if datetime.now().astimezone() + timedelta(seconds=RETRY_WAIT + estimate(fmt, kind)) > dl:
                     break
                 sleep(RETRY_WAIT)
-                wait_cool(dl - timedelta(seconds=estimate(fmt)), sleep)  # 重試也算一次開跑
-                if datetime.now().astimezone() + timedelta(seconds=estimate(fmt)) > dl:
+                wait_cool(dl - timedelta(seconds=estimate(fmt, kind)), sleep)  # 重試也算一次開跑
+                if datetime.now().astimezone() + timedelta(seconds=estimate(fmt, kind)) > dl:
                     break  # 降溫也會耗時，真正重試前必須再守一次截止時間
     return {"status": "failed", "error": err}

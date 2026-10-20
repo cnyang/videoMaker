@@ -7,7 +7,7 @@
 
 ## 硬規則（違反前必須先問使用者）
 
-1. **只用 `LICENSES.md` 白名單內的模型**（ACE-Step 1.5、FLUX.1 schnell、Wan 2.2 TI2V-5B、Qwen-Image-Edit-2509、clef-flash:9b）。換模型／LoRA／節點前先查授權頁，並同步更新 `LICENSES.md`、`models.txt`。禁用清單見 `LICENSES.md`。
+1. **只用 `LICENSES.md` 白名單內的模型**（ACE-Step 1.5、FLUX.1 schnell、FLUX.3 Image Klein＋prompt upsampler〔僅兒童音樂關鍵幀；Kommunity License，年營收須低於 US$5M〕、Wan 2.2 TI2V-5B、Qwen-Image-Edit-2509、clef-flash:9b）。換模型／LoRA／節點前先查授權頁，並同步更新 `LICENSES.md`、`models.txt`。禁用清單見 `LICENSES.md`。
 2. **金鑰與 token 不進專案、不進 git、不印到日誌**（`~/.config/videomaker/{client_secret,token}.json`）。hooks 也會擋 `.env`、`secrets.*`，不要繞過。
 3. **上傳一律 `private`，且必須人工核准**（`status.json` 為 `approved`）才能上傳。不要加自動核准、自動公開。token 範圍只有 `youtube.upload`，無法改已上傳影片。
 4. **不要降低 `VMK_MIN_FREE_GB` 硬跑**；記憶體不足就該中止。不要在夜間排程時段（週一到週四 19:30 起）手動跑 GPU 工作。
@@ -90,12 +90,20 @@ work/history.jsonl              → 夜間排程每支的結果；weekly 靠它�
 - 切點是**偵測到的拍點**，不是理論網格；重拍用「前 4 拍的 RMS 能量最大者」的啟發式（程式內有 `ponytail:` 註解，錯一拍時切點仍在拍上）。實測 BPM 與設定差 >5% 就重生。
 - `frame_bounds` 用累積四捨五入，每個切點誤差 ≤ 0.5 幀。
 
+**關鍵幀（pipeline.keyframes）**
+- 兒童音樂走 `workflow_map.yaml` 的 `keyframe_flux3`（FLUX.3 Image Klein，提示詞先經 upsampler 擴寫），小知識維持 `keyframe`（schnell）：2026-10-20 A/B（6 鏡）FLUX.3 構圖與場景明顯較好，但水獺會畫得像海豹，物種外觀對小知識風險較高，所以沒換。依 `plan.kind` 分流。
+- **upsampler 不可拿掉**：官方說不用結果明顯較弱，實測無 upsampler 還會出現白色上下邊（現在有 `_has_white_bars` 擋，但別因此拿掉 upsampler）。擴寫後的 caption 從 history 的 `pup_text`（`PreviewAny`）取回，存進 `meta.json` 的 `shots[].upsampled`（授權證據）。
+- ComfyUI 釘在 v0.41.3（FLUX.3 要 `CLIPLoader type=flux3`），升級與回滾見 operations.md#部署與開發。
+- 2026-10-20 在 GX10 實測（獨立工作目錄，作業 `little-bear-bouncing-ball` 的 plan）：14 鏡關鍵幀 466 秒（≈33 秒/張，`nightly.KEYFRAME_SEC` 取 35）、0 次黑白邊重生、14/14 有 `upsampled`；用這些關鍵幀跑 2 鏡 Wan 各約 334 秒（與 schnell 版的 346 秒相當），抽幀對照 4.8 秒內角色與背景穩定，沒有比 schnell 版差（樣本只有 2 鏡，人工看片仍不可省）。
+- 記憶體峰值（相對基線 52.8GB）：FLUX.3＋upsampler 37.4GB、Wan 29.6GB，所以關鍵幀階段多要 `pipeline.FLUX3_EXTRA_GB`（8GB）；`VMK_MIN_FREE_GB` 的基準沒有降低。
+- 黑邊與白邊都會換 seed 重生：`_has_white_bars` 用 `negate`＋cropdetect，只認「橫跨整張寬、上下都有」的白帶，白色背景的圖不會誤判（19 張實測圖只標出該標的 1 張）。
+
 **影片（Wan 2.2 TI2V-5B）**
 - 解析度只能 **704×1280**，幀數必須是 **4n+1**（`LENGTH = 121`，24fps ≈ 5.04 秒），不補幀；`mux` 時才放大裁切到 1080×1920。
 - 每個 GPU 階段開始前 `Comfy.prepare()` = **先 `/free` 再檢查記憶體**（順序不可反，否則被自己上一階段擋住）；階段結束再 `free()`。
 - 長片／xl 重複使用鏡頭：判斷用 **`n_unique < n_slots`**，不要寫死片型名稱（`new_job` 有註解）；重複同一鏡頭時換起點幀（`REUSE_OFFSETS`）。
 - 照片模式加的負向提示詞 `PHOTO_NEG` **含簡體字是刻意的**（Wan 官方負向提示詞就是簡體中文，workflow 裡的預設 `neg` 也是），不要被簡繁檢查「修正」——`SIMPLIFIED` 只套用在 YouTube 欄位與夜間主題。正向用 `only the dogs are in the scene` 而不寫否定句（Wan 對 "no hands" 反而容易畫出手）。
-- 關鍵幀有黑邊（`_has_black_bars`）會換 seed 重生最多 3 次，3 次後**不會報錯**而是沿用最後一張。
+- 關鍵幀有黑邊或白邊（`_has_black_bars`、`_has_white_bars`）會換 seed 重生最多 3 次，3 次後**不會報錯**而是沿用最後一張。
 
 **小知識（trivia，週二、週四）**
 - `Plan.kind`（`kids` 預設／`trivia`）、`facts`（字幕＋`quote`）、`sources`。**來源驗證在 `plan.check_facts`**：quote 必須逐字存在於抓到的條目、字幕數字必須出現在 quote、字幕的實詞必須出現在自己的 quote（`unsupported_words`，啟發式、會擋同義詞；調整虛詞表 `_STOP` 前先看 operations.md 的限制）。只在 `make_plan(article=...)` 套用，舊 plan.json 與合輯 plan 載入不受影響（`weekly` 的合輯 plan 是 `facts=[]`、`sources` 彙整）。

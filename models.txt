@@ -6,6 +6,12 @@ Comfy-Org/flux1-schnell/flux1-schnell-fp8.safetensors checkpoints
 Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors diffusion_models
 Comfy-Org/Wan_2.1_ComfyUI_repackaged/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors text_encoders
 Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/vae/wan2.2_vae.safetensors vae
+# 兒童音樂關鍵幀（2026-10-20 使用者放行）：FLUX.3 Image Klein，授權是 FLUX Kommunity License v1.0（營收 < US$5M 可營利），
+# 文字編碼器與 upsampler 為 Apache-2.0，詳見 LICENSES.md。
+black-forest-labs/flux-3-image-klein-comfy/diffusion_models/flux3-image-klein-bf16.safetensors diffusion_models
+black-forest-labs/flux-3-image-klein-comfy/text_encoders/qwen3vl_4b_bf16.safetensors text_encoders
+black-forest-labs/flux-3-image-klein-comfy/vae/flux2-vae.safetensors vae
+black-forest-labs/flux-3-image-klein-comfy/text_encoders/qwen3.5_9b_flux3_prompt_upsampler_bf16.safetensors text_encoders
 # Ollama 自動視覺 QC（2026-10-15 使用者放行）：clef-flash:9b，Apache-2.0，詳見 LICENSES.md。
 # 由 GX10 的 ollama pull clef-flash:9b 下載，不使用本清單的 ComfyUI 下載腳本。
 # 主題與分鏡企劃（2026-10-16 使用者放行，均已安裝）：qwen3.8:27b（兒童音樂）、gemma4:31b（小知識）。

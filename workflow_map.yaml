@@ -6,6 +6,14 @@ keyframe:
     seed: [[ks, seed]]
     width: [[latent, width]]
     height: [[latent, height]]
+# 兒童音樂的關鍵幀：FLUX.3 Image Klein + prompt upsampler（提示詞先經 upsampler 擴寫）；小知識仍用上面的 schnell
+keyframe_flux3:
+  file: workflows/flux3_klein.json
+  fields:
+    prompt: [[pup, prompt]]
+    seed: [[ks, seed]]
+    width: [[latent, width]]
+    height: [[latent, height]]
 music:
   file: workflows/ace_step.json
   fields:

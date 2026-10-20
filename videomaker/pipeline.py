@@ -365,8 +365,8 @@ def _keyframes_from_photos(job: Job, todo: list):
         c.free()
 
 
-def _has_black_bars(path: Path, w: int, h: int) -> bool:
-    """FLUX 偶爾會畫出上下（或左右）黑邊的 letterbox 圖；cropdetect 偵測有效畫面範圍，縮水超過 3% 就算有黑邊。"""
+def _crop(path: Path, pre: str = "") -> tuple[int, int, int, int] | None:
+    """cropdetect 偵測到的有效畫面 (寬, 高, x, y)；pre 是前置濾鏡（negate 會讓白邊變成黑邊再偵測）。"""
     err = _ff(
         "-loop",
         1,
@@ -377,13 +377,37 @@ def _has_black_bars(path: Path, w: int, h: int) -> bool:
         "-i",
         path,
         "-vf",
-        "cropdetect=limit=24:round=2:reset=0",
+        f"{pre}cropdetect=limit=24:round=2:reset=0",
         "-f",
         "null",
         "-",
     )
-    found = re.findall(r"crop=(\d+):(\d+):", err)
-    return bool(found) and (int(found[-1][0]) < 0.97 * w or int(found[-1][1]) < 0.97 * h)
+    found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", err)
+    return tuple(map(int, found[-1])) if found else None
+
+
+def _has_black_bars(path: Path, w: int, h: int) -> bool:
+    """FLUX 偶爾會畫出上下（或左右）黑邊的 letterbox 圖；cropdetect 偵測有效畫面範圍，縮水超過 3% 就算有黑邊。"""
+    crop = _crop(path)
+    return bool(crop) and (crop[0] < 0.97 * w or crop[1] < 0.97 * h)
+
+
+def _has_white_bars(path: Path, w: int, h: int) -> bool:
+    """FLUX.3 不經 upsampler 時實測會畫出上下白帶（占高度約 23%）。
+
+    白色背景的圖也會被 negate 後的 cropdetect 縮小，所以只認「橫跨整張寬、上下都有」的白帶：
+    白底的主體幾乎不會橫跨整張寬，裁切後寬度會縮水。
+    """
+    crop = _crop(path, "negate,")
+    if not crop:
+        return False
+    cw, ch, _, y = crop
+    return cw >= 0.97 * w and y >= 0.03 * h and h - y - ch >= 0.03 * h
+
+
+# 2026-10-20 GX10 實測的記憶體峰值（相對基線）：FLUX.3＋upsampler 37.4GB、Wan 29.6GB。VMK_MIN_FREE_GB（預設 40）
+# 對 Wan 留約 10GB 餘裕，FLUX.3 多吃 8GB，要同樣餘裕就得多要 8GB（預設等於 48GB）
+FLUX3_EXTRA_GB = 8
 
 
 def keyframes(job: Job):
@@ -393,19 +417,25 @@ def keyframes(job: Job):
     if job.meta.get("images"):  # 照片模式：不呼叫 FLUX
         return _keyframes_from_photos(job, todo)
     c = Comfy()
-    c.prepare()
     w, h = job.size
+    # 兒童音樂用 FLUX.3（提示詞先經官方 upsampler 擴寫，不用的話官方說結果明顯較弱）；小知識維持 schnell
+    # （A/B 顯示 FLUX.3 的物種外觀較不準，小知識不能冒險）
+    workflow = "keyframe_flux3" if job.plan.kind == "kids" else "keyframe"
+    c.prepare(extra_gb=FLUX3_EXTRA_GB if workflow == "keyframe_flux3" else 0)
     with job.timed("keyframes"):
         for s in todo:
             dest = job.p("keyframes", f"{s.id:02d}.png")
-            for attempt in range(3):  # 有黑邊就換 seed 重生，最多 3 次
+            for attempt in range(3):  # 有黑邊或白邊就換 seed 重生，最多 3 次
                 seed = job.plan.seed + s.id + 1000 * attempt  # 同一支影片固定 seed 基底
-                wf = fill("keyframe", prompt=job.plan.full_prompt(s), seed=seed, width=w, height=h)
+                wf = fill(workflow, prompt=job.plan.full_prompt(s), seed=seed, width=w, height=h)
                 c.run(wf, dest, timeout=900)
-                if not _has_black_bars(dest, w, h):
+                if not (_has_black_bars(dest, w, h) or _has_white_bars(dest, w, h)):
                     break
-                log.warning("shot %d 關鍵幀有黑邊，換 seed 重生（%d/3）", s.id, attempt + 1)
+                log.warning("shot %d 關鍵幀有黑邊或白邊，換 seed 重生（%d/3）", s.id, attempt + 1)
             job.meta["shots"][str(s.id)] = {"seed": seed, "prompt": job.plan.full_prompt(s)}
+            # 實際送進 FLUX.3 的 caption 也是授權證據（schnell 的 workflow 沒有這個輸出）
+            if caption := c.last_outputs.get("pup_text", {}).get("text"):
+                job.meta["shots"][str(s.id)]["upsampled"] = caption[0]
             job.meta["models"]["keyframes"] = models_in(wf)
             job.save_meta()
     c.free()
