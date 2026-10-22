@@ -192,16 +192,23 @@ def test_real_extraction_and_labeling_use_identical_frames(tmp_path, monkeypatch
         assert (out / "frames" / row["id"]).read_bytes() == expected[row["time"]]
 
 
-@pytest.fixture
-def compare():
+def _load_script(name):
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location(
-        "compare_nemotron", config.ROOT / "scripts/compare_nemotron.py"
-    )
+    spec = importlib.util.spec_from_file_location(name, config.ROOT / f"scripts/{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def compare():
+    return _load_script("compare_nemotron")
+
+
+@pytest.fixture
+def ab_ref():
+    return _load_script("ab_ref")
 
 
 def _batch(out, n):
@@ -327,3 +334,19 @@ def test_main_without_labels_only_keeps_scores_and_with_labels_warns_on_few_bad(
         assert compare.main([str(tmp_path)]) == 0
     assert json.loads((tmp_path / "compare.json").read_text())["nemotron"]["bad"] == 1
     assert "不可靠" in caplog.text
+
+
+def test_ref_workflow_drops_second_image_and_leaves_no_dangling_node(ab_ref):
+    wf = ab_ref.ref_workflow("p", "ref.png", 7, 704, 1280)
+    assert "img2" not in wf and "image2" not in wf["pos"]["inputs"] and "image2" not in wf["neg"]["inputs"]
+    refs = {v[0] for n in wf.values() for v in n["inputs"].values() if isinstance(v, list)}
+    assert refs <= set(wf)  # 空的 LoadImage 會讓 ComfyUI 拒絕整個 workflow，所以不能留懸空引用
+    assert wf["img1"]["inputs"]["image"] == "ref.png" and wf["ks"]["inputs"]["seed"] == 7
+
+
+def test_edit_prompt_keeps_character_and_prop_but_swaps_scene(ab_ref):
+    from types import SimpleNamespace
+
+    plan = SimpleNamespace(character="a round bear cub", prop="a red kite", style="flat 2D cartoon")
+    text = ab_ref.edit_prompt(plan, SimpleNamespace(prompt="dancing in a meadow"))
+    assert "a round bear cub, holding a red kite" in text and "New scene: dancing in a meadow" in text
