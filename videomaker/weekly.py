@@ -15,13 +15,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config, pipeline, visual_qc
-from .plan import DIALOGUE_KINDS, KINDS, Plan, Youtube
+from .plan import KINDS, Plan, Youtube
 
 log = logging.getLogger("videomaker")
 MERGEABLE = ("pending_review", "approved")  # 人工標記不通過、QC 失敗的不合併
-# 兒童音樂與小知識每週只在固定一晚各產 1 支（每種片型），要湊到 2 支至少要跨兩週，所以往前看 4 週、最多取最新 4 支
-WINDOW_DAYS = 28
-DIALOGUE_WINDOW_DAYS = 6  # 對白類每晚產 2 支：只合併同一週（同一晚）的，不與上週的重疊
+# 每週合併一次、只合併同一週的成片：不用滑動視窗，上週的來源不會再被串進這週的合輯（6 天 < 7 天，涵蓋當晚到本週）
+WINDOW_DAYS = 6
+NO_MERGE_FORMATS = ("xl",)  # 兒童音樂的 xl（約 5 分鐘）不加入合併
 MAX_SOURCES = 4
 # 對白類合輯的 YouTube 文案：(中文名, 英文名, 中文說明, 英文說明, hashtags)
 COMPILATION = {
@@ -55,15 +55,25 @@ def _size(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def sources(fmt: str, now: datetime, kind: str = "kids") -> list[Path]:
-    """近 WINDOW_DAYS 天（對白類 DIALOGUE_WINDOW_DAYS 天）夜間排程產生、成片還在 GX10 上、且沒被人工否決的作業（依產生時間排序，最多最新 MAX_SOURCES 支）。
+def _formats(fmt: str | tuple[str, ...]) -> tuple[str, ...]:
+    return (fmt,) if isinstance(fmt, str) else tuple(fmt)
+
+
+def sources(fmt: str | tuple[str, ...], now: datetime, kind: str = "kids") -> list[Path]:
+    """近 WINDOW_DAYS 天（同一週）夜間排程產生、成片還在 GX10 上、且沒被人工否決的作業（依產生時間排序，最多最新 MAX_SOURCES 支）。
     各內容種類分開算；解析度和多數不同（或讀不出來）的排除，-c copy 不能混不同規格。"""
+    fmts = _formats(fmt)
     hist = config.WORK / "history.jsonl"
     if not hist.exists():
         return []
-    since, out = now - timedelta(days=DIALOGUE_WINDOW_DAYS if kind in DIALOGUE_KINDS else WINDOW_DAYS), []
+    since, out = now - timedelta(days=WINDOW_DAYS), []
     for e in (json.loads(x) for x in hist.read_text(encoding="utf-8").splitlines() if x):
-        if e.get("type") == "merge" or e["format"] != fmt or e.get("kind", "kids") != kind or "job" not in e:
+        if (
+            e.get("type") == "merge"
+            or e["format"] not in fmts
+            or e.get("kind", "kids") != kind
+            or "job" not in e
+        ):
             continue  # 略過合併紀錄、其他片型與內容種類（舊紀錄沒有 kind，都是兒童音樂）、skipped／failed（沒有 job）
         if datetime.fromisoformat(e["date"]) < since:
             continue  # 上週以前的
@@ -136,7 +146,7 @@ def merge_id(kind: str, fmt: str, names: list[str]) -> str:
     return hashlib.sha256(f"{kind}|{fmt}|{','.join(sorted(names))}".encode()).hexdigest()[:12]
 
 
-def _existing(kind: str, fmt: str, mid: str) -> Path | None:
+def _existing(kind: str, fmt: str, label: str, mid: str) -> Path | None:
     """work/ 裡已有同身分的合併作業（含舊版沒有 merge_id 的，依 sources 重算）。不論目前審核狀態，人工否決的也不重做。"""
     for meta_path in sorted(config.WORK.glob("*/meta.json")):
         try:
@@ -146,7 +156,7 @@ def _existing(kind: str, fmt: str, mid: str) -> Path | None:
         if (
             "sources" not in meta
             or meta.get("kind", "kids") != kind
-            or not meta.get("format", "").endswith(fmt)
+            or not meta.get("format", "").endswith(label)
         ):
             continue
         if (meta.get("merge_id") or merge_id(kind, fmt, meta["sources"])) == mid:
@@ -165,11 +175,13 @@ def _merged_before(mid: str) -> bool:
     )
 
 
-def _merge(fmt: str, now: datetime | None, kind: str) -> tuple[Path | None, dict]:
-    """回傳 (合併作業資料夾或 None, history 紀錄)。ffmpeg 等錯誤照原樣丟出，由 merge_kind 攔下記為 failed。"""
+def _merge(fmts: str | tuple[str, ...], now: datetime | None, kind: str) -> tuple[Path | None, dict]:
+    """回傳 (合併作業資料夾或 None, history 紀錄)。ffmpeg 等錯誤照原樣丟出，由 merge_kind 攔下記為 failed。
+    fmts 是一組片型時（如兒童音樂的 short＋long），這幾種片型的成片依產生時間順序串成同一支。"""
     now = now or datetime.now().astimezone()
-    dirs = sources(fmt, now, kind)
-    label = label_of(kind, fmt)
+    dirs = sources(fmts, now, kind)
+    fmt = "+".join(_formats(fmts))  # 合併身分與 history 用 short+long
+    label = label_of(kind, "-".join(_formats(fmts)))  # 作業名只能有 - 不能有 +
     rec = {"type": "merge", "date": now.isoformat(timespec="seconds"), "topic": "", "format": fmt, "kind": kind,
            "content_type": kind}  # fmt: skip
     if len(dirs) < 2:  # 只有 1 支串起來就是原片，沒有意義
@@ -178,7 +190,7 @@ def _merge(fmt: str, now: datetime | None, kind: str) -> tuple[Path | None, dict
     names = [d.name for d in dirs]
     mid = merge_id(kind, fmt, names)
     rec |= {"merge_id": mid, "sources": names}
-    if old := _existing(kind, fmt, mid):
+    if old := _existing(kind, fmt, label, mid):
         log.info("[%s] 來源沒有變動，%s 已存在，略過", label, old.name)
         return old, rec | {"status": "skipped", "reason": "來源沒有變動，已合併過", "job": old.name}
     if _merged_before(mid):
@@ -196,14 +208,16 @@ def _merge(fmt: str, now: datetime | None, kind: str) -> tuple[Path | None, dict
         pipeline._ff("-f", "concat", "-safe", 0, "-i", out / "concat.txt", "-c", "copy",
                      "-movflags", "+faststart", out / "final.mp4")  # fmt: skip
         pipeline._ff("-ss", 1, "-i", out / "final.mp4", "-frames:v", 1, "-q:v", 2, out / "thumb.jpg")
-        (out / "plan.json").write_text(_plan(dirs, fmt, kind).model_dump_json(indent=2) + "\n")
+        (out / "plan.json").write_text(
+            _plan(dirs, "-".join(_formats(fmts)), kind).model_dump_json(indent=2) + "\n"
+        )
         (out / "concat.txt").unlink()
         dur = _duration(out / "final.mp4")
         ok = abs(dur - sum(_duration(d / "final.mp4") for d in dirs)) <= TOLERANCE
         visual = visual_qc.combine(dirs)
         now_s = datetime.now().astimezone().isoformat(timespec="seconds")
         meta = {
-            "topic": f"本週精選 {fmt}" if kind == "kids" else f"本週小知識 {fmt}",
+            "topic": f"本週精選 {label}" if kind == "kids" else f"本週小知識 {label}",
             "format": f"weekly-{label}",
             "kind": kind,
             "created_at": now_s,
@@ -212,7 +226,7 @@ def _merge(fmt: str, now: datetime | None, kind: str) -> tuple[Path | None, dict
             "merge_id": mid,
         }
         if kind in COMPILATION:
-            meta["topic"] = f"{COMPILATION[kind][0]} {fmt}"
+            meta["topic"] = f"{COMPILATION[kind][0]} {label}"
         status = {
             "status": "pending_review" if ok and visual["status"] == "passed" else "failed",
             "checks": {"duration_matches_sources": ok, "visual_qc": visual["status"] == "passed"},
@@ -234,24 +248,28 @@ def _merge(fmt: str, now: datetime | None, kind: str) -> tuple[Path | None, dict
                        "duration": round(dur, 3), "qc": status["status"]}  # fmt: skip
 
 
-def merge(fmt: str, now: datetime | None = None, kind: str = "kids") -> Path | None:
+def merge(fmt: str | tuple[str, ...], now: datetime | None = None, kind: str = "kids") -> Path | None:
     return _merge(fmt, now, kind)[0]
 
 
+def merge_group(kind: str) -> tuple[str, ...]:
+    """這種內容的哪幾種片型合併成同一支：除了 NO_MERGE_FORMATS 以外全部
+    （兒童音樂與小知識是 short＋long，對白類只有 short＝當晚的 2 支）。"""
+    return tuple(f for f in KINDS[kind] if f not in NO_MERGE_FORMATS)
+
+
 def merge_kind(kind: str, now: datetime | None = None) -> list[dict]:
-    """某一種內容的所有片型各合併一次，回傳要寫進 history 的紀錄（merged／skipped／failed）。
-    單一片型失敗（ffmpeg 等）只記為 failed，不影響其他片型，也不往外丟。"""
-    out = []
-    for fmt in KINDS[kind]:
-        try:
-            out.append(_merge(fmt, now, kind)[1])
-        except Exception as e:  # noqa: BLE001 合併是附加工作：失敗只記錄
-            log.error("[%s] 合併失敗：%r", label_of(kind, fmt), e)
-            out.append({"type": "merge", "date": (now or datetime.now().astimezone()).isoformat(timespec="seconds"),
-                        "topic": "", "format": fmt, "kind": kind, "content_type": kind,
-                        "status": "failed", "error": repr(e)})  # fmt: skip
-    return out
+    """某一種內容合併一次（merge_group 的片型串成一支），回傳要寫進 history 的紀錄（merged／skipped／failed）。
+    失敗（ffmpeg 等）只記為 failed，不往外丟。"""
+    group = merge_group(kind)
+    try:
+        return [_merge(group, now, kind)[1]]
+    except Exception as e:  # noqa: BLE001 合併是附加工作：失敗只記錄
+        log.error("[%s] 合併失敗：%r", label_of(kind, "-".join(group)), e)
+        return [{"type": "merge", "date": (now or datetime.now().astimezone()).isoformat(timespec="seconds"),
+                 "topic": "", "format": "+".join(group), "kind": kind, "content_type": kind,
+                 "status": "failed", "error": repr(e)}]  # fmt: skip
 
 
 def merge_all() -> list[Path]:
-    return [p for kind, formats in KINDS.items() for fmt in formats if (p := merge(fmt, kind=kind))]
+    return [p for kind in KINDS if (p := merge(merge_group(kind), kind=kind))]

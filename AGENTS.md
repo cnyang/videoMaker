@@ -32,7 +32,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-22）：ruff 乾淨、434 passed（約 58 秒；ComfyUI 連得到時 live 測試不再 skip）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-22）：ruff 乾淨、435 passed（約 58 秒；ComfyUI 連得到時 live 測試不再 skip）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -58,7 +58,7 @@ videomaker/
   labeling.py   視覺 QC 校準：抽出待人工標記的畫面（盲標頁面 + manifest）；CLI `visual-labels`
   visual_qc.py  clef-flash 視覺抽樣（2fps，只查成片實際用到的區段）；逐張原子保存、素材／區段／模型 digest 失效檢查、合輯結果彙整
   nightly.py    夜間排程：SCHEDULE（星期 → 內容種類）、tonight（生成後 merge_after）、LLM 想主題、預估耗時 vs deadline（H3 取 history 實際每秒成本）、GPU 降溫等待、失敗重試一次、寫 history.jsonl
-  weekly.py     合併：用 ffmpeg -c copy 把近 28 天（對白類 6 天，只合併同一晚的 2 支）同內容、同片型、同解析度的成片串成一支（最多最新 4 支）；merge_id 去重；merge_kind 回傳 history 紀錄
+  weekly.py     合併：用 ffmpeg -c copy 把近 6 天（同一週，**不是滑動視窗**）同內容、同解析度的成片串成一支（最多最新 4 支）：兒童音樂與小知識＝當晚 short＋long 串成一支（xl 不加入，`NO_MERGE_FORMATS`），對白類＝當晚 2 支 short；`merge_group(kind)` 決定哪些片型一組；merge_id 去重；merge_kind 回傳 history 紀錄
   youtube.py    OAuth、可續傳上傳（冪等）、核准閘門、listing、token 健康檢查與 renew_token
   jobs.py       作業盤點（GX10 端 inventory）＋ Mac 端 ssh／rsync 操作（下載、remote_cli、刪除）
   tui.py        Textual 介面（只在 Mac 跑）；只管畫面，遠端動作與名稱檢查都在 jobs.py
@@ -150,7 +150,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 - 預估耗時 = 獨特鏡頭數 × `SEC_PER_STEP`(17.3) × `STEPS` + 其他階段，×1.15；「現在 + 預估」超過 deadline 就略過該支，不硬跑。每支（含重試）開跑前 `wait_cool`。
 - `flock` 只保護夜間任務；手動 `make` 不受保護，會搶統一記憶體。
 - `nightly.tonight(kind="auto")` 是 cron 入口：依星期決定種類 → `nightly()` 生成 → `merge_after`（`weekly.merge_kind`，不用 GPU，例外只記進 history，**不得讓整晚變 failed**）。`nightly()` 本身不合併、回傳值只含生成結果（既有測試依賴這點）。H3 沒啟用時 `nightly()` 直接記 `skipped`，不想主題。
-- **合併身分** `merge_id` = sha256(kind｜fmt｜排序後的來源作業名)；去重看兩處：work/ 裡已有同身分（含舊版只有 `meta.sources` 的合併）、history 記過 `status: merged`（合輯上傳後 GX10 存檔被刪也不重做）。`failed` 的合併可重試。兒童音樂與小知識視窗 28 天、最多最新 4 支，是因為它們每週每種片型只產 1 支；對白類每晚 `nightly.DIALOGUE_PER_NIGHT`（2）支，視窗只有 6 天（`weekly.DIALOGUE_WINDOW_DAYS`），每週合併當晚那一對，不與上週重疊。
+- **合併身分** `merge_id` = sha256(kind｜fmt｜排序後的來源作業名)；去重看兩處：work/ 裡已有同身分（含舊版只有 `meta.sources` 的合併）、history 記過 `status: merged`（合輯上傳後 GX10 存檔被刪也不重做）。`failed` 的合併可重試。所有種類都只合併同一週的成片（`weekly.WINDOW_DAYS` = 6，**不用滑動視窗**，上週的來源不會再進這週的合輯）。`merge_id` 的片型欄是組合字串（兒童音樂與小知識 `short+long`），作業名用連字號（`weekly-short-long`、`weekly-trivia-short-long`）；`weekly.merge` 仍可傳單一片型字串。
 - history 新增的欄位全是加法；merge 紀錄必須帶 `topic`／`format`／`kind`（`_past_topics`、`weekly.sources` 直接取值），並以 `type: "merge"` 區分，`weekly.sources` 會跳過它。
 - `pipeline.run` 的呼叫簽名不能再加參數：夜間測試用 `fake_run(topic, fmt, resume, kind)` 限定參數。
 

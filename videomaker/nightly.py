@@ -18,6 +18,7 @@ from .plan import BANNED, DIALOGUE_KINDS, FORMATS, KINDS, SIMPLIFIED, extract_js
 
 log = logging.getLogger("videomaker")
 # 每晚：短片、長片、5 分鐘各 1 支；由短到長，時間不夠時被略過的是最耗時的 xl
+# 生成完把當晚的 short 與 long 合併成一支，xl 不合併（見 weekly.NO_MERGE_FORMATS）
 NIGHT = ["short", "long", "xl"]
 NIGHT_TRIVIA = KINDS["trivia"]  # 小知識夜：支援的片型就是全部（short、long），由 plan.KINDS 統一管理
 DIALOGUE_PER_NIGHT = 2  # 對白類每晚產 2 支（各自的主題），生成完把這 2 支合併

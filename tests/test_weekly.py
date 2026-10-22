@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from videomaker import __main__ as cli
-from videomaker import config, weekly
+from videomaker import config, jobs, weekly
 from videomaker.plan import Plan
 
 FRI = datetime.fromisoformat("2026-10-16T19:30:00+08:00")
@@ -92,7 +92,7 @@ def test_merge_skips_rejected_failed_missing_old_and_too_few(work):
     _job(work, "2026-10-15_d", "xl", "丁", 1, final=False)  # GX10 上的成片已被刪掉
     assert weekly.merge("xl", FRI) is None  # 只剩 1 支：串接沒有意義
     assert not (work / "2026-10-16_weekly-xl").exists()
-    _job(work, "2026-09-01_old", "xl", "很久以前", 45)  # 超過 28 天的視窗
+    _job(work, "2026-09-01_old", "xl", "很久以前", 45)  # 超過一週的視窗
     _job(work, "2026-10-15_e", "xl", "戊", 1)
     out = weekly.merge("xl", FRI)
     assert json.loads((out / "status.json").read_text())["details"]["sources"] == [
@@ -125,23 +125,22 @@ def test_merge_marks_failed_when_duration_does_not_match_sources(work, monkeypat
     assert json.loads((out / "status.json").read_text())["status"] == "failed"
 
 
-def test_weekly_cli_runs_all_formats(work, monkeypatch, capsys):
+def test_weekly_cli_runs_one_merge_per_kind_with_short_and_long_together_and_never_xl(
+    work, monkeypatch, capsys
+):
     seen = []
-    monkeypatch.setattr(weekly, "merge", lambda fmt, now=None, kind="kids": seen.append((kind, fmt)) or (work / f"w-{kind}-{fmt}" if fmt != "long" else None))  # fmt: skip
+    monkeypatch.setattr(weekly, "merge", lambda fmt, now=None, kind="kids": seen.append((kind, fmt)) or work / f"w-{kind}")  # fmt: skip
     cli.main(["weekly"])
-    # 每種內容各自合併；小知識沒有 xl，對白類只有 short
+    # 每種內容各合併一次：兒童音樂與小知識是 short＋long（xl 不加入），對白類只有 short
     assert seen == [
-        ("kids", "short"),
-        ("kids", "long"),
-        ("kids", "xl"),
-        ("trivia", "short"),
-        ("trivia", "long"),
-        ("kids_english_dialogue", "short"),
-        ("animal_sitcom", "short"),
-        ("dialogue_animation", "short"),
+        ("kids", ("short", "long")),
+        ("trivia", ("short", "long")),
+        ("kids_english_dialogue", ("short",)),
+        ("animal_sitcom", ("short",)),
+        ("dialogue_animation", ("short",)),
     ]
     out = capsys.readouterr().out
-    assert "w-kids-short" in out and "w-kids-xl" in out and "w-trivia-short" in out and "-long" not in out
+    assert "w-kids" in out and "w-trivia" in out and "xl" not in out
 
 
 def test_weekly_inherits_visual_scores_and_never_marks_unchecked_sources_passed(work):
@@ -333,17 +332,44 @@ def _kind_job(work, name, kind, day, fmt="short", size="1080x1920", status="pend
     return d
 
 
-def test_dialogue_kinds_merge_only_this_weeks_pair_while_music_kinds_look_back_four_weeks(work):
+def test_every_kind_merges_only_this_weeks_sources_with_no_sliding_window(work):
     for n, day in [("2026-10-08_a", 8), ("2026-10-08_b", 8), ("2026-10-15_c", 1), ("2026-10-15_d", 1)]:
         _kind_job(work, n, "animal_sitcom", day)
-        _kind_job(work, n.replace("2026", "2025"), "kids", day)
     (rec,) = weekly.merge_kind("animal_sitcom", FRI)
     assert rec["status"] == "merged" and sorted(rec["sources"]) == [
         "2026-10-15_c",
         "2026-10-15_d",
     ]  # 上週的不重疊
-    kids = [r for r in weekly.merge_kind("kids", FRI) if r["format"] == "short"]
-    assert len(kids) == 1 and len(kids[0]["sources"]) == 4  # 兒童音樂 28 天視窗：上週的也在
+    # 兒童音樂：這週只有 1 支、上週有 2 支 → 不跨週湊數，這週只有 1 支所以略過
+    _kind_job(work, "2025-10-08_e", "kids", 8)
+    _kind_job(work, "2025-10-08_f", "kids", 8, fmt="long")
+    _kind_job(work, "2025-10-15_g", "kids", 1)
+    (kids,) = weekly.merge_kind("kids", FRI)
+    assert kids["status"] == "skipped" and "1 支" in kids["reason"]
+
+
+def test_kids_and_trivia_nights_merge_short_and_long_into_one_video_and_never_xl(work):
+    for kind in ("kids", "trivia"):
+        for n, fmt in [("a", "short"), ("b", "long"), ("c", "xl")]:
+            _kind_job(work, f"2026-10-15_{kind}-{n}", kind, 1, fmt=fmt)
+    assert weekly.merge_group("kids") == weekly.merge_group("trivia") == ("short", "long")
+    assert weekly.merge_group("animal_sitcom") == ("short",)
+    for kind, name in [
+        ("kids", "2026-10-16_weekly-short-long"),
+        ("trivia", "2026-10-16_weekly-trivia-short-long"),
+    ]:
+        (rec,) = weekly.merge_kind(kind, FRI)  # 一種內容一筆紀錄，沒有 xl 的紀錄
+        assert rec["status"] == "merged" and rec["format"] == "short+long" and rec["job"] == name
+        assert sorted(rec["sources"]) == [
+            f"2026-10-15_{kind}-a",
+            f"2026-10-15_{kind}-b",
+        ]  # short 在前、long 在後，沒有 xl
+        out = work / name
+        assert jobs.valid(name)  # 作業名要能過 jobs.valid（只能有小寫英數與連字號）
+        assert abs(_duration(out / "final.mp4") - 2.0) < 0.2  # 兩支各 1 秒串成一支
+        assert json.loads((out / "meta.json").read_text())["merge_id"] == rec["merge_id"]
+        (again,) = weekly.merge_kind(kind, FRI)  # 同一組來源不重做
+        assert again["status"] == "skipped" and again["job"] == name
 
 
 def test_merge_kind_skips_with_a_reason_when_fewer_than_two_sources(work):
@@ -430,7 +456,7 @@ def test_legacy_merge_without_merge_id_still_blocks_a_duplicate(work):
     (old / "meta.json").write_text(
         json.dumps({"format": "weekly-short", "kind": "kids", "sources": [a.name, b.name]})
     )
-    (rec,) = [r for r in weekly.merge_kind("kids", FRI) if r["format"] == "short"]
+    _, rec = weekly._merge("short", FRI, "kids")  # 舊版單一片型的合併（沒有 merge_id）
     assert rec["status"] == "skipped" and rec["job"] == old.name
 
 
