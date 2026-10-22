@@ -543,7 +543,14 @@ def test_inventory_reports_content_kind_and_defaults_old_jobs_to_kids(tmp_path, 
         (directory / "plan.json").write_text(json.dumps(plan))
         (directory / "meta.json").write_text("{}")
     assert {r["name"]: r["kind"] for r in jobs.inventory()} == {GOOD[0]: "kids", GOOD[1]: "trivia"}
-    assert jobs.KIND_ZH == {"kids": "兒童音樂", "trivia": "小知識"}
+    assert jobs.KIND_ZH["kids"] == "兒童音樂" and jobs.KIND_ZH["trivia"] == "小知識"
+    assert set(jobs.KIND_ZH) == {
+        "kids",
+        "trivia",
+        "kids_english_dialogue",
+        "animal_sitcom",
+        "dialogue_animation",
+    }
 
 
 def test_visual_summary_applies_current_threshold_to_saved_results(tmp_path):

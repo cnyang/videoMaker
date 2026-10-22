@@ -1,0 +1,14 @@
+{
+  "id": "rabbit_01",
+  "name": "Rosie",
+  "species": "rabbit",
+  "breed": "white rabbit",
+  "appearance": "a small white rabbit with long soft ears, pink inner ears and a fluffy round tail, flat 2D cartoon style, soft pastel colors",
+  "personality": "kind, patient and playful; she loves to answer questions and help friends",
+  "accessories": "a green knitted sweater",
+  "voice": "a gentle, clear, friendly young female voice speaking slowly and clearly",
+  "references": {
+    "front": "front.png",
+    "happy": "happy.png"
+  }
+}

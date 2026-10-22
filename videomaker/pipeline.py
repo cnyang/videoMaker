@@ -13,9 +13,9 @@ from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 
-from . import audio, config, visual_qc, wiki
+from . import audio, config, content, renderers, visual_qc, wiki
 from .comfy import Comfy, fill, models_in
-from .plan import FACTS_PER, FORMATS, Plan, build_layout, make_plan, shot_math
+from .plan import DIALOGUE_KINDS, FACTS_PER, FORMATS, KINDS, Plan, build_layout, make_plan, shot_math
 
 log = logging.getLogger("videomaker")
 STAGES = ["plan", "music", "keyframes", "clips", "mux", "qc"]
@@ -62,6 +62,12 @@ class Job:
 
     def windows(self) -> list[tuple[int, float, float, float]]:
         """實際放進成片的素材區段（秒）：(鏡頭 id, 素材起點, 素材終點, 成片起點)；視覺 QC 只查這些畫面。"""
+        # 對白類沒有拍點：每個鏡頭整段使用，位置見 dialogue.mux 寫的 timeline.json
+        if self.p("timeline.json").exists():
+            return [
+                (t["shot"], 0.0, t["duration"], t["start"])
+                for t in json.loads(self.p("timeline.json").read_text())
+            ]
         beats = json.loads(self.p("beats.json").read_text())
         bounds = audio.frame_bounds(beats["cuts"], FPS)
         return [
@@ -183,18 +189,25 @@ def _use_photos(plan: Plan, srcs: list[Path], d: Path) -> list[dict]:
 def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", kind: str = "kids") -> Job:
     t = time.monotonic()
     bpm = config.DEFAULT_BPM
-    _, n_slots, _ = shot_math(bpm, fmt)
-    n_unique = FORMATS[fmt]["unique"] or n_slots
-    reuse = n_unique < n_slots  # 獨特鏡頭比時段少 → 要重複使用（long、xl）；用這個判斷，不要寫死片型名稱
     article = None
-    if kind == "trivia":  # 小知識：topic 就是英文維基百科條目名稱，先抓條目，LLM 只能依它寫
-        if fmt not in FACTS_PER or images:
-            raise ValueError(f"小知識只支援片型 {'／'.join(FACTS_PER)}，且不能搭配照片模式")
-        article = wiki.fetch(topic)
-    extra = {"article": article, "n_facts": FACTS_PER[fmt]} if article else {}  # 兒童音樂維持原本的呼叫方式
-    plan = make_plan(topic, n_unique, bpm, long=reuse, **extra)
-    if reuse:
-        plan.layout = build_layout(n_unique, n_slots, plan.seed)
+    if kind in DIALOGUE_KINDS:  # 對白類：LLM 寫結構化腳本（鏡頭與對白），沒有 BPM、拍點與重複使用鏡頭
+        if fmt not in KINDS[kind] or images:
+            raise ValueError(f"{kind} 只支援片型 {'／'.join(KINDS[kind])}，且不能搭配照片模式")
+        plan = content.make_script(kind, topic)
+    else:
+        _, n_slots, _ = shot_math(bpm, fmt)
+        n_unique = FORMATS[fmt]["unique"] or n_slots
+        reuse = n_unique < n_slots  # 獨特鏡頭比時段少 → 要重複使用（long、xl）；用這個判斷，不要寫死片型名稱
+        if kind == "trivia":  # 小知識：topic 就是英文維基百科條目名稱，先抓條目，LLM 只能依它寫
+            if fmt not in FACTS_PER or images:
+                raise ValueError(f"小知識只支援片型 {'／'.join(FACTS_PER)}，且不能搭配照片模式")
+            article = wiki.fetch(topic)
+        extra = (
+            {"article": article, "n_facts": FACTS_PER[fmt]} if article else {}
+        )  # 兒童音樂維持原本的呼叫方式
+        plan = make_plan(topic, n_unique, bpm, long=reuse, **extra)
+        if reuse:
+            plan.layout = build_layout(n_unique, n_slots, plan.seed)
     day = f"{datetime.now().astimezone():%Y-%m-%d}"
     d = config.WORK / f"{day}_{plan.slug}"
     i = 2
@@ -214,6 +227,12 @@ def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", ki
         "llm": config.plan_model(kind),
         "bpm_set": bpm,
     }
+    if kind in DIALOGUE_KINDS:
+        del meta["bpm_set"]
+        meta |= {
+            "kind": kind,
+            "renderer": content.renderer_for(kind),
+        }  # renderer 在建立作業時定案：續跑不會中途換
     if article:  # 來源證據：條目標題、固定版本的連結與授權
         meta["kind"] = "trivia"
         meta["wikipedia"] = {"title": article.title, "url": article.permalink, "license": "CC BY-SA 4.0"}
@@ -243,6 +262,14 @@ def _measure(path: Path, af: str = "") -> dict:
         "-i", path, "-vn", "-af", f"{af}loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"
     )
     return json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", err, re.DOTALL).group(0))
+
+
+def loudnorm_filter(m: dict) -> str:
+    """兩段式 loudnorm 的第二段：套用 _measure 量到的值，線性調整到 -14 LUFS。"""
+    return (
+        f"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+        f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true"
+    )
 
 
 # ---------- 音樂 + 拍點 ----------
@@ -418,7 +445,7 @@ def keyframes(job: Job):
         return _keyframes_from_photos(job, todo)
     c = Comfy()
     w, h = job.size
-    # 兒童音樂用 FLUX.3（提示詞先經官方 upsampler 擴寫，不用的話官方說結果明顯較弱）；小知識維持 schnell
+    # 兒童音樂用 FLUX.3（提示詞先經官方 upsampler 擴寫，不用的話官方說結果明顯較弱）；小知識與對白類（fl2va）維持 schnell
     # （A/B 顯示 FLUX.3 的物種外觀較不準，小知識不能冒險）
     workflow = "keyframe_flux3" if job.plan.kind == "kids" else "keyframe"
     c.prepare(extra_gb=FLUX3_EXTRA_GB if workflow == "keyframe_flux3" else 0)
@@ -540,12 +567,17 @@ def caption_filters(job: Job, bounds: list[int]) -> str:
     ):
         text = job.p("captions", f"{i:02d}.txt")  # 用檔案傳文字，不必處理 drawtext 的逸出規則
         text.write_text("\n".join(textwrap.wrap(fact.text, CAPTION_WIDTH)), encoding="utf-8")
-        out.append(
-            f"drawtext=fontfile='{font}':textfile='{text}':expansion=none:fontsize=54:fontcolor=white:"
-            f"line_spacing=14:box=1:boxcolor=black@0.6:boxborderw=26:x=(w-text_w)/2:y=h*0.62:"
-            f"enable='gte(t,{bounds[a] / FPS:.3f})*lt(t,{bounds[b] / FPS:.3f})'"  # 相鄰兩則交界那一幀只顯示後一則
-        )
+        out.append(drawtext_filter(font, text, bounds[a] / FPS, bounds[b] / FPS))
     return "," + ",".join(out)
+
+
+def drawtext_filter(font: Path, text: Path, start: float, end: float) -> str:
+    """一段字幕：白字黑底框，[start, end) 秒內顯示；相鄰兩段交界那一幀只顯示後一段。小知識與對白類共用。"""
+    return (
+        f"drawtext=fontfile='{font}':textfile='{text}':expansion=none:fontsize=54:fontcolor=white:"
+        f"line_spacing=14:box=1:boxcolor=black@0.6:boxborderw=26:x=(w-text_w)/2:y=h*0.62:"
+        f"enable='gte(t,{start:.3f})*lt(t,{end:.3f})'"
+    )
 
 
 def mux(job: Job):
@@ -585,10 +617,7 @@ def mux(job: Job):
             job.p("audio_trim.wav"),
         )
         m = _measure(job.p("audio_trim.wav"))
-        ln = (
-            f"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
-            f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true"
-        )
+        ln = loudnorm_filter(m)
         _ff(
             *inputs,
             "-i",
@@ -666,7 +695,8 @@ def _qc(job: Job):
             _ff("-i", final, "-an", "-vf", "blackdetect=d=0.2:pix_th=0.10", "-f", "null", "-"),
         )
     ]
-    lo, hi = FORMATS[job.fmt]["min_total"], FORMATS[job.fmt]["max_total"]
+    kind = job.meta.get("kind", "kids")  # 兒童音樂的 meta 沒有 kind
+    lo, hi = content.qc_range(kind, job.fmt)
     checks = {
         "resolution_1080x1920": bool(v) and (v[0]["width"], v[0]["height"]) == (1080, 1920),
         f"duration_{lo}_{hi}": lo <= dur <= hi,
@@ -674,6 +704,10 @@ def _qc(job: Job):
         "loudness_-14±1.5": abs(lufs + 14) <= 1.5,
         "no_long_black": max(black, default=0) < 0.5,
     }
+    if kind in DIALOGUE_KINDS:  # 對白類另外檢查無聲區間與字幕（純 metadata，不用 ASR）
+        from . import dialogue  # 延遲載入：dialogue 會匯入 pipeline，頂層匯入會循環
+
+        checks |= dialogue.checks(job, final, dur)
     if all(checks.values()):
         visual = visual_qc.check(job)
     else:  # 基本檢查已失敗，結果注定是 failed；不為此佔用共用 GPU 與統一記憶體
@@ -714,6 +748,10 @@ def run(
     fmt: str = "short",
     kind: str = "kids",
 ) -> Job:
+    if (
+        kind in DIALOGUE_KINDS and not dry_run
+    ):  # 先擋掉：renderer 沒啟用就別花 LLM 與 GPU 時間規劃一支注定出不了片的作業
+        renderers.require(content.renderer_for(kind))
     job = find_job(topic, fmt, kind) if resume else None
     if resume and job is None and kind == "trivia":  # 已有正式標題的作業可離線續跑；別名才需要查維基
         topic = wiki.fetch(topic).title
@@ -723,8 +761,13 @@ def run(
     log.addHandler(fh)
     try:
         if not dry_run:
+            fns = FNS
+            if job.plan.kind in DIALOGUE_KINDS:
+                from . import dialogue
+
+                fns = dialogue.FNS  # 對白類的 music／keyframes／clips／mux 不同；qc 共用
             for st in STAGES[1 : STAGES.index(upto) + 1]:
-                FNS[st](job)
+                fns[st](job)
     finally:
         log.removeHandler(fh)
     return job

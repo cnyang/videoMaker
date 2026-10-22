@@ -5,8 +5,9 @@ from pathlib import Path
 
 import requests
 
-from . import comfy, config, jobs, labeling, nightly, pipeline, weekly, youtube
+from . import characters, comfy, config, jobs, labeling, nightly, pipeline, weekly, youtube
 from .pipeline import STAGES
+from .plan import DIALOGUE_KINDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,9 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mk.add_argument(
         "--kind",
-        choices=["kids", "trivia"],
+        choices=["kids", "trivia", *DIALOGUE_KINDS],
         default="kids",
-        help="kids = 兒童音樂；trivia = 小知識（topic 填英文維基百科條目名稱，片型只支援 short／long）",
+        help="kids = 兒童音樂；trivia = 小知識（topic 填英文維基百科條目名稱，片型只支援 short／long）；"
+        "kids_english_dialogue／animal_sitcom／dialogue_animation = 對白類（topic 填繁體中文主題，只支援 short，需啟用 H3）",
     )
     mk.add_argument("--dry-run", action="store_true", help="只產 plan.json，不呼叫 ComfyUI")
     mk.add_argument(
@@ -43,7 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
         "nightly", help="夜間排程：LLM 想主題，依序產生（預設 short、long、xl 各 1 支），deadline 前結束"
     )
     nt.add_argument(
-        "--kind", choices=["kids", "trivia"], default="kids", help="今晚產哪一種：兒童音樂或小知識"
+        "--kind",
+        choices=["auto", "kids", "trivia", *DIALOGUE_KINDS],
+        default="kids",
+        help="今晚產哪一種；auto = 依星期（週一兒童音樂、二小知識、三兒童英文對話、四動物短劇、五有對白的動畫，週末不跑）。"
+        "生成結束後會接著合併同一種內容（不用 GPU，失敗不影響成片）",
     )
     nt.add_argument(
         "--plan",
@@ -52,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     nt.add_argument("--deadline", default="07:00", help="必須結束的時間 HH:MM")
     nt.add_argument("--dry-run", action="store_true", help="只想主題並預估，不產生影片")
     sub.add_parser(
-        "weekly", help="週五合併：本週夜間產生的兒童音樂與小知識，各按片型分開串成一支（不用 GPU）"
+        "weekly",
+        help="手動合併：每種內容各按片型，把近期夜間成片串成一支（不用 GPU；夜間排程結束後會自動做一次）",
     )
     sub.add_parser("auth", help="YouTube OAuth 授權（在有瀏覽器的機器上跑一次）")
     for name, h in (
@@ -78,6 +85,17 @@ def build_parser() -> argparse.ArgumentParser:
     lb.add_argument("out", type=Path, help="輸出資料夾（frames/、index.html、manifest.json）")
     lb.add_argument("--top", type=int, default=40, help="分數最高的畫面張數")
     lb.add_argument("--random", type=int, default=40, help="其餘畫面隨機抽幾張（檢查低分有沒有漏判）")
+    ch = sub.add_parser(
+        "characters", help="固定角色庫：list 列出角色與參考圖狀態；build 一次性產生缺少的參考圖（佔用 GPU）"
+    )
+    ch.add_argument("action", choices=["list", "build"])
+    ch.add_argument("ids", nargs="*", help="build 時只處理這些角色 ID（預設全部）")
+    ch.add_argument(
+        "--force", action="store_true", help="build 時覆蓋已存在的參考圖（會破壞既有角色外觀，請謹慎）"
+    )
+    ch.add_argument(
+        "--salt", type=int, default=0, help="build 時換一組 seed（0 = 預設；要換圖時用，如 1、2）"
+    )
     sub.add_parser("bench", help="各階段耗時基準")
     sub.add_parser("check", help="檢查 workflow 用到的模型 ComfyUI 是否看得到")
     return ap
@@ -120,13 +138,21 @@ def main(argv=None):
                 print(d.name, "失敗：", repr(e)[:300])
         raise SystemExit(1 if failed else 0)
     elif a.cmd == "nightly":
-        for r in nightly.nightly(a.plan.split(",") if a.plan else None, a.deadline, a.dry_run, kind=a.kind):
+        for r in nightly.tonight(a.kind, a.plan.split(",") if a.plan else None, a.deadline, a.dry_run):
             print(json.dumps(r, ensure_ascii=False))
     elif a.cmd == "weekly":
         for p in weekly.merge_all():
             print(p)
     elif a.cmd == "visual-labels":
         print(f"{labeling.export(a.out, a.top, a.random)} 張 → {a.out}/index.html")
+    elif a.cmd == "characters":
+        if a.action == "build":
+            for path in characters.build(a.ids or None, a.force, salt=a.salt):
+                print(path)
+        else:
+            for cid in characters.ids():
+                missing = characters.load(cid).missing_refs()
+                print(cid, "缺參考圖：" + "、".join(missing) if missing else "參考圖齊全")
     elif a.cmd == "bench":
         print(pipeline.bench())
     elif a.cmd == "check":

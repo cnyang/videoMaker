@@ -28,7 +28,13 @@ STATE_ZH = {
     "rejected": "不通過",
     "failed": "QC 失敗",
 }
-KIND_ZH = {"kids": "兒童音樂", "trivia": "小知識"}
+KIND_ZH = {
+    "kids": "兒童音樂",
+    "trivia": "小知識",
+    "kids_english_dialogue": "兒童英文對話",
+    "animal_sitcom": "動物短劇",
+    "dialogue_animation": "有對白的動畫",
+}
 VISUAL_STATE_ZH = {
     "passed": "未見疑慮",
     "flagged": "有疑慮",

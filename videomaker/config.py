@@ -19,9 +19,26 @@ COOL_TEMP = int(
     os.getenv("VMK_COOL_TEMP", "45")
 )  # 每支生成前 GPU 要降到此溫度（°C）以下才開跑；閒置實測約 36-37°C
 DEFAULT_BPM = 120
+CHARACTERS = Path(
+    os.getenv("VMK_CHARACTERS", ROOT / "characters")
+)  # 固定角色庫：character.json 與參考圖，跨集重用、不每晚重生
 FONT = os.getenv(
     "VMK_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 )  # 小知識字幕用的字型（GX10 內建 DejaVu）
+
+
+# ---------- H3 renderer（2026-10-22 使用者放行；授權地區限制見 LICENSES.md。VMK_H3_ENABLED=0 可一鍵關閉）----------
+H3_ENABLED = os.getenv("VMK_H3_ENABLED", "1") == "1"
+# H3 比 Wan 吃更多統一記憶體：這是「相對 VMK_MIN_FREE_GB 再多要的 GB」，基準門檻不降低。尚未實測，先用保守值，首次實跑後依 meta／日誌校準
+H3_EXTRA_GB = float(os.getenv("VMK_H3_EXTRA_GB", "25"))
+H3_SIZE = tuple(
+    int(x) for x in os.getenv("VMK_H3_SIZE", "576x1024").split("x")
+)  # 9:16、32 的倍數；mux 再放大裁切到 1080x1920
+H3_STEPS = int(os.getenv("VMK_H3_STEPS", "20"))  # H3 取樣步數（官方範本預設 20）
+H3_DEFAULT_SEC_PER_SEC = float(
+    os.getenv("VMK_H3_SEC_PER_SEC", "90")
+)  # 沒有 history 時，每秒成片的保守生成秒數
+H3_SHOT_SEC = (5.0, 15.0)  # H3 訓練範圍約 124–362 幀（24fps）= 5–15 秒；單鏡企劃時長必須落在這裡
 
 
 def plan_model(kind: str) -> str:

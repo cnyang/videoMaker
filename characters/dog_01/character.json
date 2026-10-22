@@ -1,0 +1,16 @@
+{
+  "id": "dog_01",
+  "name": "Mochi",
+  "species": "dog",
+  "breed": "corgi",
+  "appearance": "a small chubby corgi with fluffy orange and white fur, short legs, perky triangle ears and big round brown eyes, flat 2D cartoon style",
+  "personality": "easygoing and a little lazy, loves snacks and naps, quietly dramatic when things go wrong",
+  "accessories": "a small blue necktie",
+  "voice": "a bright, slightly tired young adult male voice, quick and expressive",
+  "references": {
+    "front": "front.png",
+    "side": "side.png",
+    "happy": "happy.png",
+    "sad": "sad.png"
+  }
+}

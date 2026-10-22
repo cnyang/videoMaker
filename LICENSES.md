@@ -32,14 +32,32 @@
 
 ## 禁用
 
-FLUX.1 [dev]、MiniMax H3（含 LoRA 與衍生）、任何 RIFE TensorRT 節點（CC BY-NC-SA）、LTX-2.x、Stable Audio 3、白名單以外的任何模型／LoRA。
-NAS `/volume1/comfyUI-model` 內的 MiniMax H3、LTX-2.3、FLUX.2 檔案**不得**用於本管線。
+FLUX.1 [dev]、MiniMax H3 的 Turbo LoRA／ControlNet／風格 embedding（未核對；H3 主模型見下方放行紀錄）、任何 RIFE TensorRT 節點（CC BY-NC-SA）、LTX-2.x、Stable Audio 3、白名單以外的任何模型／LoRA。
+NAS `/volume1/comfyUI-model` 內的 LTX-2.3、FLUX.2 檔案**不得**用於本管線；MiniMax H3 的檔案 2026-10-22 起可從 NAS 拉，但必須通過下方的 sha256 驗證。
+
+## 白名單外、經使用者明確放行（2026-10-22）：MiniMax H3
+
+使用者於 2026-10-22 明確放行，用於週三到週五的對白類內容（兒童英文對話、動物短劇、有對白的動畫；`renderers.py` 的 `h3_fl2va`／`h3_ref2va`）。兒童音樂與小知識仍用 Wan，不使用 H3。
+
+| 用途 | 模型／檔案 | 授權 | 核對依據 |
+|---|---|---|---|
+| 對白類影片＋音訊 | MiniMax H3 → `minimax_h3_fl2va_pruned_int8_convrot.safetensors`、`minimax_h3_ref2va_pruned_int8_convrot.safetensors`（Comfy-Org 重新打包 `Comfy-Org/MiniMax-H3`） | MiniMax H3 Community License Agreement（License date 2026-08-02；HF 標籤 `minimax-h3-community-license-agreement`） | HF `MiniMaxAI/MiniMax-H3` 的 `LICENSE` 全文；重新打包頁 `Comfy-Org/MiniMax-H3` 標示同一授權 |
+| 同上 | 文字編碼器 `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`、VAE `minimax_h3_video_vae_int8_convrot.safetensors`、`minimax_h3_audio_vae_fp32.safetensors` | 同上（同一個 repo、同一份授權） | 同上 |
+
+**授權條件（放行不解除這些限制）：**
+
+- **地區**：授權範圍是「全世界，但排除歐盟、英國、南韓與美國」（§I.3、§I.5）；在這些地區使用不在授權內（§V.4）。這個管線的生成在台灣的 GX10 進行；但**影片公開到 YouTube 後，這些地區的觀眾也看得到**，是否構成「在排除地區使用或展示」要由你判斷，上傳一律私人、公開前由你決定（程式不會公開）。
+- **商業**：商業產品或服務年營收超過 US$20M 要另行取得 MiniMax 書面授權（§IV.1）；商業產品介面要顯著標示「MiniMax H3」（§IV.2）。
+- **散布**：轉散布模型或衍生檔要附授權全文、修改檔要標示修改，並附 NOTICE「MiniMax H3 is licensed under the MiniMax H3 Community License Agreement, Copyright © 2026 MiniMax. All Rights Reserved.」（§III）。本專案只在 GX10 本機使用權重，不散布。
+- **未納入**：Turbo LoRA（`minimax_h3_*_turbo_*step*`）、ControlNet（`model_patches/`）與風格 embedding 未納入，用之前需另外核對。
+- 權重來源：NAS `/volume1/comfyUI-model` 的 H3 檔案（使用者 2026-10-22 放行，`scripts/nas_pull_h3.sh`）或 HF `Comfy-Org/MiniMax-H3`（`scripts/download.sh`）。**一律要與 HF 的 LFS sha256 相同才採用**（腳本自動驗，不符改名 `.bad`）。NAS 只有 fp16 的 video VAE，沒有 workflow 用的 `int8_convrot`，所以這個檔從 HF 下載。
+- 一鍵關閉：`VMK_H3_ENABLED=0`（cron 的 `env`）；關閉後對白類夜間排程只記 `skipped`。
 
 ## 白名單外、經使用者明確放行（2026-10-05）
 
 | 用途 | 模型／檔案 | 授權 | 核對依據 |
 |---|---|---|---|
-| 照片模式：兩隻狗同框的關鍵幀合成 | Qwen-Image-Edit-2509 → `qwen_image_edit_2509_fp8_e4m3fn.safetensors` | Apache 2.0 | HF `Qwen/Qwen-Image-Edit-2509` 與 `Comfy-Org/Qwen-Image-Edit_ComfyUI` 皆標 apache-2.0 |
+| 照片模式：兩隻狗同框的關鍵幀合成；對白類角色參考圖的多視角編輯（2026-10-22，同一模型、同一授權） | Qwen-Image-Edit-2509 → `qwen_image_edit_2509_fp8_e4m3fn.safetensors` | Apache 2.0 | HF `Qwen/Qwen-Image-Edit-2509` 與 `Comfy-Org/Qwen-Image-Edit_ComfyUI` 皆標 apache-2.0 |
 | 同上 | 文字編碼器 `qwen_2.5_vl_7b_fp8_scaled.safetensors`（Qwen2.5-VL **7B**） | Apache 2.0 | HF `Qwen/Qwen2.5-VL-7B-Instruct` apache-2.0（注意：Qwen2.5-VL 的 3B／72B 授權不同，不可換用） |
 | 同上 | `qwen_image_vae.safetensors` | Apache 2.0 | HF `Qwen/Qwen-Image` apache-2.0 |
 

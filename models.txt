@@ -16,3 +16,10 @@ black-forest-labs/flux-3-image-klein-comfy/text_encoders/qwen3.5_9b_flux3_prompt
 # 由 GX10 的 ollama pull clef-flash:9b 下載，不使用本清單的 ComfyUI 下載腳本。
 # 主題與分鏡企劃（2026-10-16 使用者放行，均已安裝）：qwen3.8:27b（兒童音樂）、gemma4:31b（小知識）。
 # 兩者均為 Apache-2.0，使用 Ollama，不交給本清單的 ComfyUI 下載腳本。
+# 對白類 renderer（2026-10-22 使用者放行）：MiniMax H3，MiniMax H3 Community License Agreement（排除美國、歐盟、英國、南韓，見 LICENSES.md）。
+# 約 55GB：scripts/download.sh "MiniMax-H3" 限速下載（可續傳、sha256 驗證）。
+Comfy-Org/MiniMax-H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors diffusion_models
+Comfy-Org/MiniMax-H3/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors diffusion_models
+Comfy-Org/MiniMax-H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors text_encoders
+Comfy-Org/MiniMax-H3/vae/minimax_h3_video_vae_int8_convrot.safetensors vae
+Comfy-Org/MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors vae

@@ -13,10 +13,10 @@ from videomaker.plan import Plan
 FRI = datetime.fromisoformat("2026-10-16T19:30:00+08:00")
 
 
-def _clip(path, secs):
+def _clip(path, secs, size="1080x1920"):
     """和管線 mux 同規格（1080x1920、24fps、h264 + aac 48k）的假成片，才能驗證 -c copy 串接。"""
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=blue:s=1080x1920:r=24:d={secs}",
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=blue:s={size}:r=24:d={secs}",
          "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:d={secs}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-ar", "48000", "-shortest", str(path)],
         check=True,
@@ -92,7 +92,7 @@ def test_merge_skips_rejected_failed_missing_old_and_too_few(work):
     _job(work, "2026-10-15_d", "xl", "丁", 1, final=False)  # GX10 上的成片已被刪掉
     assert weekly.merge("xl", FRI) is None  # 只剩 1 支：串接沒有意義
     assert not (work / "2026-10-16_weekly-xl").exists()
-    _job(work, "2026-10-05_old", "xl", "上週", 11)  # 超過 6 天：屬於上週
+    _job(work, "2026-09-01_old", "xl", "很久以前", 45)  # 超過 28 天的視窗
     _job(work, "2026-10-15_e", "xl", "戊", 1)
     out = weekly.merge("xl", FRI)
     assert json.loads((out / "status.json").read_text())["details"]["sources"] == [
@@ -129,13 +129,16 @@ def test_weekly_cli_runs_all_formats(work, monkeypatch, capsys):
     seen = []
     monkeypatch.setattr(weekly, "merge", lambda fmt, now=None, kind="kids": seen.append((kind, fmt)) or (work / f"w-{kind}-{fmt}" if fmt != "long" else None))  # fmt: skip
     cli.main(["weekly"])
-    # 兒童音樂與小知識各自合併；小知識沒有 xl
+    # 每種內容各自合併；小知識沒有 xl，對白類只有 short
     assert seen == [
         ("kids", "short"),
         ("kids", "long"),
         ("kids", "xl"),
         ("trivia", "short"),
         ("trivia", "long"),
+        ("kids_english_dialogue", "short"),
+        ("animal_sitcom", "short"),
+        ("dialogue_animation", "short"),
     ]
     out = capsys.readouterr().out
     assert "w-kids-short" in out and "w-kids-xl" in out and "w-trivia-short" in out and "-long" not in out
@@ -310,3 +313,144 @@ def test_combined_qc_times_include_preceding_videos_and_drop_unknown_offsets(tmp
     status.pop("details")
     (dirs[0] / "status.json").write_text(json.dumps(status))
     assert "final_time" not in weekly.visual_qc.combine(dirs)["scores"]["visual_defect"]
+
+
+# ---------- 每日合併：身分去重、不混種類、解析度、視窗 ----------
+def _kind_job(work, name, kind, day, fmt="short", size="1080x1920", status="pending_review"):
+    """任一種內容的假作業（plan 帶 kind、history 有 kind），成片規格可指定。"""
+    d = _job(work, name, fmt, f"{kind}-{name[-1]}", day, status=status, final=False)
+    plan = json.loads((d / "plan.json").read_text())
+    plan |= {"kind": kind, "slug": name.split("_")[1]}
+    if kind not in ("kids", "trivia"):
+        del plan["music"]
+        plan["script"] = {"title": "x"}  # 對白類沒有 music、帶結構化腳本
+    (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False))
+    _clip(d / "final.mp4", 1, size)
+    hist = work / "history.jsonl"
+    lines = [json.loads(x) for x in hist.read_text().splitlines()]
+    lines[-1]["kind"] = kind
+    hist.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines))
+    return d
+
+
+def test_dialogue_kinds_merge_only_this_weeks_pair_while_music_kinds_look_back_four_weeks(work):
+    for n, day in [("2026-10-08_a", 8), ("2026-10-08_b", 8), ("2026-10-15_c", 1), ("2026-10-15_d", 1)]:
+        _kind_job(work, n, "animal_sitcom", day)
+        _kind_job(work, n.replace("2026", "2025"), "kids", day)
+    (rec,) = weekly.merge_kind("animal_sitcom", FRI)
+    assert rec["status"] == "merged" and sorted(rec["sources"]) == [
+        "2026-10-15_c",
+        "2026-10-15_d",
+    ]  # 上週的不重疊
+    kids = [r for r in weekly.merge_kind("kids", FRI) if r["format"] == "short"]
+    assert len(kids) == 1 and len(kids[0]["sources"]) == 4  # 兒童音樂 28 天視窗：上週的也在
+
+
+def test_merge_kind_skips_with_a_reason_when_fewer_than_two_sources(work):
+    _kind_job(work, "2026-10-15_a", "animal_sitcom", 1)
+    (rec,) = weekly.merge_kind("animal_sitcom", FRI)
+    assert rec["status"] == "skipped" and "1 支" in rec["reason"] and rec["type"] == "merge"
+    assert rec["kind"] == "animal_sitcom" and rec["format"] == "short" and "topic" in rec
+    assert not list(work.glob("*_weekly-*"))
+
+
+def test_merge_is_deterministic_and_never_repeats_for_the_same_source_set(work):
+    a = _kind_job(work, "2026-10-12_a", "kids_english_dialogue", 4)
+    b = _kind_job(work, "2026-10-13_b", "kids_english_dialogue", 3)
+    (first,) = weekly.merge_kind("kids_english_dialogue", FRI)
+    mid = weekly.merge_id("kids_english_dialogue", "short", [a.name, b.name])
+    assert first["status"] == "merged" and first["merge_id"] == mid and first["qc"] == "pending_review"
+    assert weekly.merge_id("kids_english_dialogue", "short", [b.name, a.name]) == mid  # 與順序無關
+    out = work / first["job"]
+    assert out.name == "2026-10-16_weekly-kids-english-dialogue-short"
+    assert json.loads((out / "meta.json").read_text())["merge_id"] == mid
+    mtime = (out / "final.mp4").stat().st_mtime
+    # 隔天再跑：來源沒變 → 不重做
+    (again,) = weekly.merge_kind("kids_english_dialogue", FRI + timedelta(days=1))
+    assert again["status"] == "skipped" and "沒有變動" in again["reason"] and again["job"] == out.name
+    assert (out / "final.mp4").stat().st_mtime == mtime and len(list(work.glob("*_weekly-*"))) == 1
+    # 合輯被刪掉（例如上傳後清掉 GX10 存檔）：history 記過就不再重做同一份
+    import shutil
+
+    shutil.rmtree(out)
+    with (work / "history.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(first, ensure_ascii=False) + "\n")
+    (gone,) = weekly.merge_kind("kids_english_dialogue", FRI + timedelta(days=2))
+    assert gone["status"] == "skipped" and "history" in gone["reason"] and not list(work.glob("*_weekly-*"))
+    # 多了新來源 → 新身分、產生新的合併
+    _kind_job(work, "2026-10-17_c", "kids_english_dialogue", 0)
+    (new,) = weekly.merge_kind("kids_english_dialogue", FRI + timedelta(days=2))
+    assert new["status"] == "merged" and new["merge_id"] != mid and len(new["sources"]) == 3
+
+
+def test_failed_merge_attempts_can_be_retried_and_never_raise_out_of_merge_kind(work, monkeypatch):
+    _kind_job(work, "2026-10-12_a", "animal_sitcom", 4)
+    _kind_job(work, "2026-10-13_b", "animal_sitcom", 3)
+    monkeypatch.setattr(weekly.pipeline, "_ff", lambda *a: (_ for _ in ()).throw(RuntimeError("ffmpeg 失敗")))
+    (rec,) = weekly.merge_kind("animal_sitcom", FRI)
+    assert (
+        rec["status"] == "failed" and "ffmpeg" in rec["error"] and not list(work.glob("*_weekly-*"))
+    )  # 不留半成品
+    monkeypatch.undo()
+    monkeypatch.setattr(config, "WORK", work)
+    (retry,) = weekly.merge_kind("animal_sitcom", FRI)
+    assert retry["status"] == "merged"  # failed 不算「已合併過」，下次可重試
+
+
+def test_merge_only_mixes_same_content_type_format_and_resolution(work):
+    kids = _kind_job(work, "2026-10-12_a", "kids", 4)
+    s1 = _kind_job(work, "2026-10-13_b", "animal_sitcom", 3)
+    s2 = _kind_job(work, "2026-10-14_c", "animal_sitcom", 2)
+    _kind_job(work, "2026-10-14_d", "dialogue_animation", 2)  # 別的種類
+    _kind_job(work, "2026-10-14_e", "animal_sitcom", 2, fmt="long")  # 別的片型
+    odd = _kind_job(work, "2026-10-15_f", "animal_sitcom", 1, size="540x960")  # 解析度不同，-c copy 不能混
+    names = [d.name for d in weekly.sources("short", FRI, "animal_sitcom")]
+    assert names == [s1.name, s2.name] and odd.name not in names and kids.name not in names
+    assert [d.name for d in weekly.sources("short", FRI)] == [kids.name]
+
+
+def test_merge_ignores_history_merge_records_and_old_or_excess_sources(work):
+    dirs = [
+        _kind_job(work, f"2026-09-{10 + i}_{chr(97 + i)}", "kids", 40 - i) for i in range(2)
+    ]  # 40 天前：視窗外
+    assert weekly.sources("short", FRI) == [] and dirs
+    recent = [_kind_job(work, f"2026-10-{10 + i}_{chr(97 + i)}", "kids", 6 - i) for i in range(6)]
+    got = weekly.sources("short", FRI)
+    assert got == recent[-weekly.MAX_SOURCES :]  # 最多取最新的 MAX_SOURCES 支
+    with (work / "history.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "merge", "date": FRI.isoformat(), "topic": "", "format": "short", "kind": "kids", "job": "2026-10-16_weekly-short", "status": "merged"}) + "\n")  # fmt: skip
+    assert weekly.sources("short", FRI) == got  # 合併紀錄不會被當成來源
+
+
+def test_legacy_merge_without_merge_id_still_blocks_a_duplicate(work):
+    a = _kind_job(work, "2026-10-12_a", "kids", 4)
+    b = _kind_job(work, "2026-10-13_b", "kids", 3)
+    old = work / "2026-10-14_weekly-short"
+    old.mkdir()
+    (old / "meta.json").write_text(
+        json.dumps({"format": "weekly-short", "kind": "kids", "sources": [a.name, b.name]})
+    )
+    (rec,) = [r for r in weekly.merge_kind("kids", FRI) if r["format"] == "short"]
+    assert rec["status"] == "skipped" and rec["job"] == old.name
+
+
+def test_dialogue_merge_is_a_valid_reviewable_plan_with_its_own_youtube_copy(work):
+    for name, day in (("2026-10-12_a", 4), ("2026-10-13_b", 3)):
+        _kind_job(work, name, "dialogue_animation", day)
+    (rec,) = weekly.merge_kind("dialogue_animation", FRI)
+    out = work / rec["job"]
+    plan = Plan.model_validate_json((out / "plan.json").read_text())
+    assert plan.kind == "dialogue_animation" and plan.script == {} and "動畫小故事精選" in plan.youtube.title
+    st = json.loads((out / "status.json").read_text())
+    assert st["status"] == "pending_review" and "approved" not in st  # 合併後仍要人工核准
+    assert json.loads((out / "meta.json").read_text())["kind"] == "dialogue_animation"
+
+
+def test_a_corrupt_meta_json_does_not_break_merging(work):
+    _kind_job(work, "2026-10-12_a", "animal_sitcom", 4)
+    _kind_job(work, "2026-10-13_b", "animal_sitcom", 3)
+    broken = work / "2026-10-14_broken"
+    broken.mkdir()
+    (broken / "meta.json").write_text("{")  # 別的行程寫到一半
+    (rec,) = weekly.merge_kind("animal_sitcom", FRI)
+    assert rec["status"] == "merged"

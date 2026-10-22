@@ -43,3 +43,29 @@ compose:
     seed: [[ks, seed]]
     width: [[latent, width]]
     height: [[latent, height]]
+# 對白類的 H3 renderer（2026-10-22 使用者放行；gate: h3 = VMK_H3_ENABLED 沒關閉才檢查模型，授權限制見 LICENSES.md）
+# 結構取自 ComfyUI 官方範本 video_minimax_h3_i2v／r2v；尚未在 GX10 實跑驗證
+clip_h3_fl2va:
+  file: workflows/h3_fl2va.json
+  gate: h3
+  fields:
+    prompt: [[h3, prompt]]
+    first_frame: [[img, image]]
+    seed: [[noise, noise_seed]]
+    width: [[h3, width], [fit, width]]
+    height: [[h3, height], [fit, height]]
+    length: [[h3, length]]
+    steps: [[sched, steps]]
+clip_h3_ref2va:
+  file: workflows/h3_ref2va.json
+  gate: h3
+  fields:
+    prompt: [[h3, prompt]]
+    ref0: [[ref0, image]]
+    ref1: [[ref1, image]]
+    ref2: [[ref2, image]]
+    seed: [[noise, noise_seed]]
+    width: [[h3, width]]
+    height: [[h3, height]]
+    length: [[h3, length]]
+    steps: [[sched, steps]]

@@ -1,0 +1,14 @@
+{
+  "id": "bear_01",
+  "name": "Benny",
+  "species": "bear",
+  "breed": "brown bear cub",
+  "appearance": "a round brown bear cub with a cream belly, small round ears and big friendly eyes, flat 2D cartoon style, soft pastel colors",
+  "personality": "curious, cheerful and eager to learn new words",
+  "accessories": "a small yellow backpack",
+  "voice": "a warm, clear, cheerful child-like voice speaking slowly and clearly",
+  "references": {
+    "front": "front.png",
+    "happy": "happy.png"
+  }
+}

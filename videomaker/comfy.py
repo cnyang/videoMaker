@@ -32,6 +32,8 @@ def missing_models(info: dict) -> list[tuple[str, str]]:
     多半是沒下載或放錯資料夾（ComfyUI 只認各類型資料夾第一層，hf download 會留下 split_files/ 巢狀目錄）。"""
     out = []
     for name, spec in MAP.items():
+        if spec.get("gate") == "h3" and not config.H3_ENABLED:
+            continue  # VMK_H3_ENABLED=0：關閉 H3 時不檢查它的模型
         for node in json.loads((config.ROOT / spec["file"]).read_text()).values():
             field = LOADERS.get(node["class_type"])
             if not field:

@@ -49,7 +49,7 @@ uv run python -m videomaker tui                                            # 互
 ## 專案結構
 
 ```
-videomaker/        Python 套件（pipeline、plan、comfy、audio、youtube、nightly、weekly、jobs、tui）
+videomaker/        Python 套件（pipeline、plan、content、dialogue、renderers、characters、comfy、audio、youtube、nightly、weekly、jobs、tui）
 workflows/         ComfyUI API 格式 workflow（flux、ace_step、wan22、qwen_compose）
 workflow_map.yaml  要替換的 workflow 節點欄位
 tests/             pytest（不需要 GPU／ComfyUI）

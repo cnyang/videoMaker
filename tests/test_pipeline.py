@@ -246,6 +246,12 @@ def test_workflows_match_live_object_info():
                 if kind == "COMFY_DYNAMICCOMBO_V3":
                     chosen = next(o for o in opt[0]["options"] if o["key"] == node["inputs"].get(name))
                     known |= {f"{name}.{k}" for group in chosen["inputs"].values() for k in group}
+                if (
+                    kind == "COMFY_AUTOGROW_V3"
+                ):  # 動態長出的輸入（如 H3 的 ref_images.ref_image_0）：<名稱>.<前綴><序號>
+                    tpl = opt[0]["template"]
+                    prefix, limit = tpl["prefix"], tpl["max"]
+                    known |= {f"{name}.{prefix}{i}" for i in range(limit)}
             given = set(node["inputs"])
             assert given <= known, f"{f.name}:{nid} 未知輸入 {given - known}"
             assert set(spec["required"]) <= given, f"{f.name}:{nid} 缺必填 {set(spec['required']) - given}"
@@ -1221,6 +1227,17 @@ def _yt_job(tmp_path, status="approved", images=None):
     return d
 
 
+def test_youtube_body_omits_the_kids_declaration_for_non_kids_content(tmp_path):
+    from videomaker import youtube
+
+    plan = Plan.model_validate_json((_yt_job(tmp_path) / "plan.json").read_text())
+    for kind, kids in [("kids", True), ("trivia", True), ("kids_english_dialogue", True),
+                       ("animal_sitcom", False), ("dialogue_animation", False)]:  # fmt: skip
+        status = youtube.build_body(plan.model_copy(update={"kind": kind}), {})["status"]
+        assert ("selfDeclaredMadeForKids" in status) is kids, kind
+        assert status["privacyStatus"] == "private"  # 不論種類，上傳一律私人
+
+
 def test_youtube_body_is_private_kids_and_trimmed(tmp_path):
     from videomaker import youtube
 
@@ -1624,7 +1641,13 @@ def test_nightly_default_plan_is_short_long_xl_everywhere():
     assert nightly.NIGHT == ["short", "long", "xl"]
     args = cli.build_parser().parse_args(["nightly"])
     assert args.plan is None and args.kind == "kids"  # 沒帶 --plan 時依 --kind 決定：kids 就是 NIGHT
-    assert nightly.PLANS == {"kids": ["short", "long", "xl"], "trivia": ["short", "long"]}
+    assert nightly.PLANS == {
+        "kids": ["short", "long", "xl"],
+        "trivia": ["short", "long"],
+        "kids_english_dialogue": ["short", "short"],
+        "animal_sitcom": ["short", "short"],
+        "dialogue_animation": ["short", "short"],
+    }  # 兒童音樂與小知識維持原樣；對白類每晚 2 支 short
     assert [
         f for plan in nightly.PLANS.values() for f in plan if f not in nightly.FORMATS
     ] == []  # 每個片型都存在
@@ -2636,3 +2659,238 @@ def test_bad_topic_types_retry_instead_of_crashing_nightly(monkeypatch, bad, kin
     suggest = nightly.suggest_topics if kind == "kids" else nightly.suggest_trivia_topics
     assert suggest(1, []) == (["小貓跳舞"] if kind == "kids" else ["Sea otter"])
     assert len(calls) == 2
+
+
+# ---------- 對白類：星期路由、夜間保護機制、每日合併 ----------
+def _hours_from_now(hours):
+    from datetime import datetime, timedelta
+
+    return (datetime.now().astimezone() + timedelta(hours=hours)).strftime("%H:%M")
+
+
+def test_schedule_routes_each_weekday_to_its_content_kind():
+    from datetime import datetime, timedelta
+
+    from videomaker import nightly
+
+    monday = datetime(2026, 10, 19).astimezone()
+    assert monday.weekday() == 0
+    assert [nightly.kind_for(monday + timedelta(days=i)) for i in range(7)] == [
+        "kids",
+        "trivia",
+        "kids_english_dialogue",
+        "animal_sitcom",
+        "dialogue_animation",
+        None,  # 週末不跑
+        None,
+    ]
+    assert set(nightly.SCHEDULE.values()) == set(nightly.PLANS)  # 每種內容都有排到一天
+
+
+def test_tonight_auto_picks_the_kind_runs_the_night_then_merges_it(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        nightly,
+        "nightly",
+        lambda plan, dl, dry, sleep, kind: calls.append(("night", kind)) or [{"status": "ok"}],
+    )
+    merged = [{"type": "merge", "topic": "", "format": "short", "kind": "x", "status": "merged"}]
+    monkeypatch.setattr(nightly.weekly, "merge_kind", lambda kind: calls.append(("merge", kind)) or merged)
+    wednesday = datetime(2026, 10, 21, 19, 30).astimezone()
+    res = nightly.tonight("auto", now=wednesday)
+    assert calls == [("night", "kids_english_dialogue"), ("merge", "kids_english_dialogue")]  # 先生成、後合併
+    assert [r.get("type", "night") for r in res] == ["night", "merge"]
+    hist = [json.loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
+    assert hist == merged  # 合併結果寫進 history
+    calls.clear()
+    nightly.tonight("auto", now=datetime(2026, 10, 22, 19, 30).astimezone())  # 週四動物短劇也合併
+    assert calls == [("night", "animal_sitcom"), ("merge", "animal_sitcom")]
+    calls.clear()
+    assert (
+        nightly.tonight("auto", now=datetime(2026, 10, 24, 19, 30).astimezone()) == [] and calls == []
+    )  # 週六
+    assert nightly.tonight("kids", dry_run=True) and ("merge", "kids") not in calls  # dry-run 不合併
+
+
+def test_merge_failure_never_fails_the_night_and_is_recorded(tmp_path, monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(nightly, "nightly", lambda *a: [{"status": "pending_review"}])
+    monkeypatch.setattr(
+        nightly.weekly, "merge_kind", lambda kind: (_ for _ in ()).throw(RuntimeError("ffmpeg 壞了"))
+    )
+    res = nightly.tonight("trivia")
+    assert (
+        res[0]["status"] == "pending_review"
+        and res[1]["status"] == "failed"
+        and "ffmpeg 壞了" in res[1]["error"]
+    )
+    hist = [json.loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
+    assert (
+        hist[0]["type"] == "merge"
+        and hist[0]["kind"] == "trivia"
+        and "topic" in hist[0]
+        and "format" in hist[0]
+    )
+    # merge 紀錄不會被當成生成作業：不會干擾主題去重
+    assert nightly._past_topics() == []
+
+
+def test_h3_nights_are_skipped_without_planning_while_the_renderer_is_disabled(tmp_path, monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "H3_ENABLED", False)
+    monkeypatch.setattr(nightly, "suggest_dialogue_topics", lambda *a: pytest.fail("不該想主題"))
+    monkeypatch.setattr(nightly.pipeline, "run", lambda *a, **k: pytest.fail("不該跑管線"))
+    res = nightly.nightly(kind="kids_english_dialogue", deadline=_hours_from_now(8))
+    assert (
+        [r["status"] for r in res] == ["skipped", "skipped"]  # 對白類每晚 2 支，各記一筆
+        and "未啟用" in res[0]["reason"]
+        and res[0]["renderer"] == "h3_fl2va"
+    )
+    assert json.loads((tmp_path / "history.jsonl").read_text().splitlines()[0])["status"] == "skipped"
+
+
+def test_h3_night_is_skipped_without_planning_while_weights_are_not_installed(tmp_path, monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "H3_ENABLED", True)
+    monkeypatch.setattr(nightly.renderers, "missing_weights", lambda name: ["m.safetensors"])
+    monkeypatch.setattr(nightly, "suggest_dialogue_topics", lambda *a: pytest.fail("不該想主題"))
+    monkeypatch.setattr(nightly.pipeline, "run", lambda *a, **k: pytest.fail("不該跑管線"))
+    res = nightly.nightly(kind="animal_sitcom", deadline=_hours_from_now(8))
+    assert [r["status"] for r in res] == ["skipped", "skipped"] and "m.safetensors" in res[0]["reason"]
+    assert json.loads((tmp_path / "history.jsonl").read_text().splitlines()[0])["status"] == "skipped"
+
+
+def _h3_night(tmp_path, monkeypatch, run):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "H3_ENABLED", True)
+    monkeypatch.setattr(nightly.renderers, "missing_weights", lambda name: [])  # 不連真的 ComfyUI
+    monkeypatch.setattr(nightly, "gpu_temp", lambda: None)
+    monkeypatch.setattr(nightly, "suggest_dialogue_topics", lambda kind, n, avoid: ["甲", "乙"][:n])
+    monkeypatch.setattr(nightly.pipeline, "run", run)
+    return nightly
+
+
+class _H3Job:
+    def __init__(self, tmp_path, topic, status="pending_review"):
+        self.dir = tmp_path / topic
+        self.dir.mkdir(exist_ok=True)
+        (self.dir / "status.json").write_text(
+            json.dumps({"status": status, "checks": {"has_audio": True}, "visual_qc": {"status": "passed"}})
+        )
+        (self.dir / "final.mp4").write_bytes(b"x")
+        shots = {str(i): {"clip_sec": 100.0, "seconds_generated": 5.0} for i in (1, 2, 3)}
+        (self.dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "renderer": "h3_ref2va",
+                    "timings": {"keyframes": 0, "clips": 300.0},
+                    "shots": shots,
+                    "models": {"clips": ["m.safetensors"]},
+                }
+            )
+        )
+
+    def p(self, name):
+        return self.dir / name
+
+
+def test_h3_night_records_renderer_timing_qc_and_per_second_generation_cost(tmp_path, monkeypatch):
+    nightly = _h3_night(tmp_path, monkeypatch, lambda topic, fmt, resume, kind: _H3Job(tmp_path, topic))
+    (res,) = nightly.nightly(["short"], _hours_from_now(8), kind="animal_sitcom")
+    assert res["status"] == "pending_review"  # 夜間排程只到待審核，不會自動核准或公開
+    for key in ("start", "end", "elapsed", "retry_count", "output", "qc", "gpu_seconds", "models"):
+        assert key in res
+    assert (
+        res["content_type"] == "animal_sitcom" and res["renderer"] == "h3_ref2va" and res["retry_count"] == 0
+    )
+    assert res["qc"] == {"status": "pending_review", "checks": {"has_audio": True}, "visual": "passed"}
+    assert res["gpu_seconds"] == 300.0 and res["h3_mode"] == "ref2va" and res["shot_count"] == 3
+    assert (res["seconds_generated"], res["generation_seconds"], res["gen_sec_per_video_sec"]) == (
+        15.0,
+        300.0,
+        20.0,
+    )
+    assert json.loads((tmp_path / "history.jsonl").read_text())["gen_sec_per_video_sec"] == 20.0
+
+
+def test_h3_estimate_starts_conservative_then_follows_recent_history(tmp_path, monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    monkeypatch.setattr(config, "H3_DEFAULT_SEC_PER_SEC", 90.0)
+    cold = nightly.estimate("short", "animal_sitcom")
+    assert cold == pytest.approx((50 * 90 + 360) * 1.15)  # 沒有資料：最長 50 秒 × 保守的每秒 90 秒生成成本
+    rates = [10.0, 30.0, 20.0, 999.0]
+    lines = [{"renderer": "h3_ref2va", "gen_sec_per_video_sec": r} for r in rates] + [
+        {"renderer": "wan", "gen_sec_per_video_sec": 1.0}, {"renderer": "h3_ref2va"}]  # fmt: skip
+    (tmp_path / "history.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines) + "garbage\n")
+    warm = nightly.estimate("short", "animal_sitcom")
+    assert warm < cold
+    assert nightly.h3_sec_per_video_sec("h3_ref2va") == sorted(rates)[len(rates) // 2]  # 中位數
+    assert nightly.h3_sec_per_video_sec("h3_fl2va") == 90.0  # 沒有資料的 renderer 用預設
+    assert nightly.estimate("short", "kids") == nightly.estimate("short", "kids")  # 兒童音樂估算不受影響
+
+
+def test_h3_night_skips_when_the_estimate_cannot_meet_the_deadline(tmp_path, monkeypatch):
+    nightly = _h3_night(tmp_path, monkeypatch, lambda *a, **k: pytest.fail("趕不上 deadline 不該開跑"))
+    res = nightly.nightly(["short"], _hours_from_now(1), kind="dialogue_animation")
+    assert [r["status"] for r in res] == ["skipped"]
+    assert json.loads((tmp_path / "history.jsonl").read_text())["status"] == "skipped"
+
+
+def test_h3_failure_waits_ten_minutes_resumes_once_then_marks_failed_and_continues(tmp_path, monkeypatch):
+    calls = []
+
+    def run(topic, fmt, resume, kind):
+        calls.append((topic, resume))
+        if topic == "甲":
+            raise RuntimeError("H3 掛了")  # 甲兩次都失敗
+        if topic == "乙" and not resume:
+            raise RuntimeError("記憶體不足")  # 乙第一次失敗、續跑成功
+        return _H3Job(tmp_path, topic)
+
+    nightly = _h3_night(tmp_path, monkeypatch, run)
+    sleeps = []
+    res = nightly.nightly(
+        ["short", "short"], _hours_from_now(20), sleep=sleeps.append, kind="kids_english_dialogue"
+    )
+    assert calls == [("甲", False), ("甲", True), ("乙", False), ("乙", True)]  # 失敗只換下一支，整晚不中止
+    assert sleeps == [nightly.RETRY_WAIT, nightly.RETRY_WAIT]
+    assert [r["status"] for r in res] == ["failed", "pending_review"]
+    assert res[0]["retry_count"] == 1 and "H3 掛了" in res[0]["error"] and res[1]["retry_count"] == 1
+
+
+def test_dialogue_uploads_stay_private_and_need_manual_approval(tmp_path):
+    from tests.test_content import SCRIPTS
+    from videomaker import youtube
+    from videomaker.content import SPECS, to_plan
+
+    plan = to_plan(SPECS["animal_sitcom"].schema.model_validate(SCRIPTS["animal_sitcom"]()), "x")
+    assert youtube.build_body(plan, {})["status"]["privacyStatus"] == "private"
+    d = tmp_path / "2026-10-22_sitcom"
+    d.mkdir()
+    (d / "plan.json").write_text(plan.model_dump_json())
+    (d / "meta.json").write_text(json.dumps({"timings": {}}))
+    (d / "status.json").write_text(json.dumps({"status": "pending_review"}))
+    (d / "final.mp4").write_bytes(b"x" * 100)
+    with pytest.raises(ValueError, match="必須先人工核准"):
+        youtube.upload(d, service=_FakeYT([{"id": "zzz"}]))  # QC 通過也只是待審核，沒有自動上傳
+    youtube.set_review(d, "approved")
+    svc = _FakeYT([{"id": "vid1", "status": {"privacyStatus": "private"}}])
+    assert (
+        youtube.upload(d, service=svc) == "vid1"
+        and svc.calls[0]["body"]["status"]["privacyStatus"] == "private"
+    )

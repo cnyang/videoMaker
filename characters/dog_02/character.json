@@ -1,0 +1,14 @@
+{
+  "id": "dog_02",
+  "name": "Bruno",
+  "species": "dog",
+  "breed": "bulldog",
+  "appearance": "a stocky gray bulldog with droopy cheeks, a broad chest and small round glasses, flat 2D cartoon style",
+  "personality": "gruff but secretly kind, always full of big announcements, fond of long meetings",
+  "accessories": "a dark suit jacket and a gold tie clip",
+  "voice": "a deep, slow, booming middle-aged male voice",
+  "references": {
+    "front": "front.png",
+    "happy": "happy.png"
+  }
+}

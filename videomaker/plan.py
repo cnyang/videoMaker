@@ -142,13 +142,17 @@ class Plan(BaseModel):
     style: str
     character: str
     prop: str = ""  # 手持道具（含顏色），選填；每鏡固定附在 character 後面，避免各鏡道具顏色不同
-    music: Music
+    music: Music | None = (
+        None  # 對白類沒有音樂階段（音訊由 H3 隨影片產生）；kids／trivia 仍必填，見 _music_required
+    )
     shots: list[Shot] = Field(min_length=1)
     layout: list[int] = []  # 長片：每個時段播哪個鏡頭 id；空 = 每鏡各一次（短片）
     youtube: Youtube = Youtube()
-    kind: Literal["kids", "trivia"] = "kids"  # kids = 兒童音樂；trivia = 小知識（有英文字幕與來源）
+    # kids = 兒童音樂；trivia = 小知識（有英文字幕與來源）；其餘三種是對白類（script 存結構化腳本，見 content.py）
+    kind: Literal["kids", "trivia", "kids_english_dialogue", "animal_sitcom", "dialogue_animation"] = "kids"
     facts: list[Fact] = []  # trivia：依序疊成字幕，每則平分時段
     sources: list[Source] = []  # trivia：資料來源（維基百科條目）；合輯會有多筆
+    script: dict = {}  # 對白類：通過 content.py 驗證的結構化腳本（鏡頭、對白、字幕、角色 ID）；合輯與舊 plan.json 為空
     seed: int = Field(default_factory=lambda: secrets.randbelow(2**31))  # 整支影片的 seed 基底，由程式產生
 
     @field_validator("style", "character")
@@ -184,9 +188,16 @@ class Plan(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _music_required(self):
+        if self.kind in ("kids", "trivia") and self.music is None:
+            raise ValueError("兒童音樂與小知識必須有 music")
+        return self
+
+    @model_validator(mode="after")
     def _content_rules(self):
-        # 照片模式（style 為空）的提示詞來自使用者的照片描述，不套用；那邊由 _use_photos 自己檢查
-        if self.style:
+        # 照片模式（style 為空）的提示詞來自使用者的照片描述，不套用；那邊由 _use_photos 自己檢查。
+        # 對白類的角色會開口說話、場景可有水與桌上文件，這組為「無旁白音樂短片」訂的規則不適用，由 content.py 自己驗證
+        if self.style and self.kind in ("kids", "trivia"):
             if len(self.character.split()) < 6:
                 raise ValueError(
                     "character 太短：要寫物種、身體顏色與 1–2 個固定特徵（如 'a round brown bear cub with a red scarf and big friendly eyes'）"
@@ -221,7 +232,13 @@ FORMATS = {
 
 # 小知識每支放幾則：字幕在各自的時段內一直顯示，short 約 10 秒一則、long 約 28 秒一則
 FACTS_PER = {"short": 2, "long": 6}
-KINDS = {"kids": list(FORMATS), "trivia": list(FACTS_PER)}  # 每種內容有哪些片型（週五合併也照這張表）
+# 對白類：初期只做 short，由 H3 一鏡一鏡產生（影片＋對白音訊），沒有拍點與音樂階段
+DIALOGUE_KINDS = ("kids_english_dialogue", "animal_sitcom", "dialogue_animation")
+KINDS = {  # 每種內容有哪些片型（每日合併與夜間排程共用這張表）
+    "kids": list(FORMATS),
+    "trivia": list(FACTS_PER),
+    **{k: ["short"] for k in DIALOGUE_KINDS},
+}
 FACT_MAX = 110  # 字幕最長字元數：1080 寬直式畫面一行約 26 字元，超過 5 行會蓋住畫面
 
 
