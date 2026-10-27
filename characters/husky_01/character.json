@@ -1,0 +1,15 @@
+{
+  "id": "husky_01",
+  "name": "Meatball",
+  "species": "dog",
+  "breed": "Siberian husky",
+  "appearance": "a fluffy black-and-white Siberian husky with a dark charcoal-gray coat on the back and a classic black facial mask, a white chest, belly and legs, upright pointed ears with pink inner ears, a bushy white-tipped tail, and two different colored eyes: one ice-blue eye and one brown eye, photorealistic",
+  "personality": "a food-loving drama king, quick to complain and scheme for snacks, but loyal and soft-hearted underneath",
+  "accessories": "",
+  "voice": "a low, relaxed, slightly sarcastic young adult voice, quick and expressive",
+  "references": {
+    "front": "front.png",
+    "side": "side.png",
+    "happy": "happy.png"
+  }
+}

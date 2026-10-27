@@ -1,0 +1,15 @@
+{
+  "id": "husky_02",
+  "name": "HappySunny",
+  "species": "dog",
+  "breed": "Siberian husky",
+  "appearance": "a big fluffy brown-and-white Siberian husky with a long thick copper-brown coat, a white face with brown markings on the forehead, a white chest and legs, upright thick-furred ears, warm amber-brown eyes, a pinkish-brown nose and a big bushy tail, photorealistic",
+  "personality": "a sunny, bubbly optimist who finds the bright side of everything and gets excited about the smallest things",
+  "accessories": "",
+  "voice": "a bright, bubbly, high-energy young adult voice, warm and cheerful",
+  "references": {
+    "front": "front.png",
+    "side": "side.png",
+    "happy": "happy.png"
+  }
+}

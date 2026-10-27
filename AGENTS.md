@@ -130,6 +130,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 - 完全無聲的音訊 loudnorm 會量到 `-inf` 而失敗，`dialogue.mux` 改成 `anull` 讓 QC 明確判不通過（不是 mux 崩潰後重試）。
 - `workflows/h3_*.json` 取自 ComfyUI 官方範本 `video_minimax_h3_i2v／r2v`（已通過 `/object_info` 結構檢查），**尚未實跑驗證**；實跑後的取樣器、步數、解析度、提示詞寫法與記憶體峰值（`VMK_H3_EXTRA_GB`）都要依實測校正。`workflow_map.yaml` 的 `gate: h3` 讓 `comfy.missing_models` 在 `VMK_H3_ENABLED=0` 時略過它們；權重還沒裝好時，`nightly` 靠 `renderers.missing_weights` 記 `skipped`（不想主題、不佔 GPU）。
 - 角色參考圖是持久資產：`characters.build` 只補缺的圖，夜間排程絕不呼叫它。
+- **動物短劇固定主角是 `content.LEADS`（`husky_01` Meatball、`husky_02` HappySunny，寫實哈士奇）**：`hook_ok` 要求 `characters` 剛好是這兩隻；`content.catalog(kind)` 只對動物短劇列出它們、其他對白類不列（寫實角色配卡通畫風會違和）；動物短劇的畫風規則在 `content.STYLES`（寫實），其他種類維持卡通。兩隻的參考圖是從使用者的角色設定圖手動裁出來的，**不要對它們跑 `characters build --force`**（`KEEP`／`VIEW_PROMPTS` 都寫死 flat 2D cartoon，會把寫實角色重畫成卡通）；要補視角請手動裁圖。個性與聲音描述是代為擬定的，使用者可隨時改 `character.json`。
 
 **視覺 QC（visual_qc.py）**
 - 抽幀用 `select` 與 `showinfo` 記錄真正的來源 PTS；不要再用 `number / FPS` 當原始時間。`SAMPLING` 進 fingerprint，標記工具只接受相同抽樣版本，舊報告要重查才能校準。

@@ -174,6 +174,10 @@ class EnglishDialogue(_Script):
             raise ValueError("最後一句必須是問觀眾的問句（含 you，以 ? 結尾），如 'What do YOU want to eat?'")
 
 
+# 動物短劇的固定主角（寫實哈士奇）；其他種類的角色清單不放它們，動物短劇也只能用它們
+LEADS = ("husky_01", "husky_02")
+
+
 class AnimalSitcom(_Script):
     KIND = "animal_sitcom"
     episode_title: str
@@ -184,8 +188,8 @@ class AnimalSitcom(_Script):
     def hook_ok(self) -> None:
         if not (self.setting.isascii() and self.hook.isascii() and self.hook.strip()):
             raise ValueError("setting 與 hook 必須是純英文且 hook 不可為空")
-        if not any(characters.load(c).species == "dog" for c in self.characters):
-            raise ValueError("動物短劇必須有至少一隻狗狗角色（species 為 dog）")
+        if set(self.characters) != set(LEADS):
+            raise ValueError(f"動物短劇的主角固定是 {list(LEADS)}，characters 必須剛好是這兩隻")
         for s in self.shots:
             if not (s.action.strip() and s.emotion.strip() and s.camera.strip()):
                 raise ValueError(f"shot {s.shot_id} 必須有 action、emotion、camera")
@@ -251,9 +255,13 @@ def qc_range(kind: str, fmt: str) -> tuple[float, float]:
 
 
 # ---------- 提示詞 ----------
-def catalog() -> str:
+def catalog(kind: str) -> str:
     out = []
     for cid in characters.ids():
+        if (cid in LEADS) != (
+            kind == "animal_sitcom"
+        ):  # 動物短劇只列主角；其他種類不列（寫實配卡通畫風會違和）
+            continue
         c = characters.load(cid)
         out.append(
             f'- {cid}: {c.name}, {c.species}' + (f" ({c.breed})" if c.breed else "")
@@ -262,15 +270,20 @@ def catalog() -> str:
     return "\n".join(out)
 
 
+STYLES = {  # 畫風規則：動物短劇的主角是寫實照片參考圖，畫風要跟著寫實；其他種類維持卡通
+    "": "flat 2D cartoon, soft pastel colors, kid-friendly",
+    "animal_sitcom": "photorealistic, natural soft lighting, cinematic, family-friendly",
+}
+
 _COMMON = """You write structured scripts for short vertical (9:16) YouTube videos where animated animal characters TALK.
 Return ONE JSON object only, no markdown. Schema (shared fields): {"slug": "lowercase-hyphen-words", "style": str, "characters": [character ids],
  "shots": [...], "youtube": {"title": str, "description": str, "tags": [str]}}
 Characters: use ONLY these existing character ids; never invent a character or a new id:
 %(catalog)s
-Rules: every field except youtube.* is PURE ENGLISH (ASCII only). style: one sentence, flat 2D cartoon, soft pastel colors, kid-friendly, the same for every shot.
+Rules: every field except youtube.* is PURE ENGLISH (ASCII only). style: one sentence, %(style)s, the same for every shot.
 A shot = ONE continuous clip of %(smin)g-%(smax)g seconds (duration, a number) with ONE simple setting and 1-2 characters on screen.
 Dialogue is a list of {"speaker": "<character id>", "text": "..."}; speakers must be characters on screen in that shot. Spoken speed is at most %(wps)g words per second of the shot.
-reference_assets (optional, may be []) entries are written "<character id>/<view>" with a SLASH, e.g. "dog_01/front", using only the reference views listed for that character above; at most %(refs)d per shot.
+reference_assets (optional, may be []) entries are written "<character id>/<view>" with a SLASH, e.g. "%(eg)s", using only the reference views listed for that character above; at most %(refs)d per shot.
 Never put text, letters, numbers, signs, logos or posters in visual descriptions: subtitles are added by the program.
 No existing cartoon characters, brands, artist names or song titles. Nothing scary, violent or unsafe for children.
 The youtube fields are BILINGUAL: youtube.title = "<繁體中文標題>｜<English title>" (max 100 characters in total, Traditional Chinese as used in Taiwan, never Simplified);
@@ -285,10 +298,11 @@ Structure: hook, character A asks a simple question, character B answers, a vari
 Natural, simple sentences: at most 10 words per sentence, every word at most 10 letters, common everyday words. "subtitle" must equal the spoken dialogue of that shot word for word.
 Use 2 characters. Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots.""",
     "animal_sitcom": """THIS IS A FUNNY ANIMAL SITCOM about everyday life (office, home, food, napping, going out, games, small misunderstandings, a small twist at the end).
-Extra keys: "episode_title": str, "setting": str, "hook": str (the first-seconds attention grabber). The cast MUST include a dog character.
-Shot keys: {"shot_id": 1, "duration": 6, "characters": [...], "action": str, "emotion": str, "camera": str, "dialogue": [...], "reference_assets": ["dog_01/front"]}.
-reference_assets entries are "<character id>/<view>" using the listed reference views, e.g. "dog_01/sad" for a sad shot. Keep the same character look in every shot.
-Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots. Example arc: dog sits in the office -> checks the clock (almost quitting time) -> the boss walks in -> boss makes an announcement -> dog's crushed reaction.""",
+Extra keys: "episode_title": str, "setting": str, "hook": str (the first-seconds attention grabber). The cast is EXACTLY the two husky leads: "characters" must be ["husky_01", "husky_02"] (Meatball and HappySunny), and nobody else appears on screen.
+Meatball and HappySunny are real-looking huskies with different personalities: let their personalities drive the jokes.
+Shot keys: {"shot_id": 1, "duration": 6, "characters": [...], "action": str, "emotion": str, "camera": str, "dialogue": [...], "reference_assets": ["husky_01/front"]}.
+reference_assets entries are "<character id>/<view>" using the listed reference views, e.g. "husky_02/happy" for a joyful shot. Keep the same character look in every shot.
+Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots. Example arc: Meatball spots the last snack -> sneaks toward it -> HappySunny cheerfully catches him -> they argue about sharing -> a small twist (the snack is gone anyway).""",
     "dialogue_animation": """THIS IS A SHORT ANIMATED STORY (entertainment, characters interacting). Extra keys: "title": str, "synopsis": str, "setting": str.
 Shot keys: {"shot_id": 1, "duration": 8, "characters": [...], "action": str, "emotion": str, "camera": str, "dialogue": [...], "visual_prompt": str, "beats": ["hook"], "reference_assets": [...]}.
 Story structure over the shots, in order: hook -> setup -> conflict -> reaction -> punchline. Each shot lists the "beats" it covers (a shot may cover more than one, but order never goes back
@@ -300,7 +314,9 @@ Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots.""",
 def system_prompt(kind: str) -> str:
     spec, smin_smax = SPECS[kind], config.H3_SHOT_SEC
     base = _COMMON % {
-        "catalog": catalog(),
+        "catalog": catalog(kind),
+        "style": STYLES.get(kind, STYLES[""]),
+        "eg": "husky_01/front" if kind == "animal_sitcom" else "dog_01/front",
         "smin": smin_smax[0],
         "smax": smin_smax[1],
         "wps": MAX_WPS,
@@ -319,7 +335,7 @@ def topic_prompt(kind: str, n: int, avoid: list[str]) -> str:
     what = {
         "kids_english_dialogue": "a simple everyday English conversation lesson for children (ordering food, favorite animals, greetings, "
         "asking for permission, finding things, telling time, going to the park)",
-        "animal_sitcom": "a funny everyday situation for a short animal sitcom starring a dog (office, home, snacks, napping, errands, games, small misunderstandings)",
+        "animal_sitcom": "a funny everyday situation for a short animal sitcom starring two husky dogs, Meatball and HappySunny (home, snacks, napping, walks, games, small misunderstandings)",
         "dialogue_animation": "a small story with a hook, a problem, a reaction and a punchline for a short animated dialogue video",
     }[kind]
     return (

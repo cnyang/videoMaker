@@ -66,7 +66,7 @@ videoMaker() {
 | 週一 19:30 | 夜間排程（**兒童音樂**）自動啟動（提早到辦公室冷氣還開著的時段，避免 GPU 在夜間無空調時長時間滿載）：LLM 想 3 個新主題，依序產生 1 支短片（約 20 秒）+ 1 支長片（約 2:48）+ 1 支 5 分鐘版，狀態停在「待審核」。實測約需 4 小時（約 23:30 到 00:20 結束），07:00 是硬性截止。結束後把當晚的 short 與 long 合併成一支，xl 不合併（見下） |
 | 週二 19:30 | 夜間排程（**小知識**）：LLM 想 2 個英文維基百科條目，依序產生 1 支短片 + 1 支長片（沒有 xl），畫面疊英文字幕、說明欄附維基來源，狀態同樣停在「待審核」。見[小知識影片](#小知識影片)。結束後把當晚的 short 與 long 合併成一支 |
 | 週三 19:30 | 夜間排程（**兒童英文對話**）：LLM 想 2 個學習主題，產生 2 支約 20～40 秒的短片（角色對話、英文字幕）。見[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫)。結束後把這 2 支合併 |
-| 週四 19:30 | 夜間排程（**動物短劇**）：固定的 AI 狗狗角色演 20～45 秒的搞笑日常短劇，每晚產 2 支，結束後把這 2 支合併 |
+| 週四 19:30 | 夜間排程（**動物短劇**）：固定主角 Meatball 與 HappySunny（兩隻寫實哈士奇）演 20～45 秒的搞笑日常短劇，每晚產 2 支，結束後把這 2 支合併 |
 | 週五 19:30 | 夜間排程（**有對白的動畫**）：30～60 秒的故事短片（起承轉合、有對白），每晚產 2 支，結束後把這 2 支合併 |
 | 每晚生成結束後 | **合併**（只用 ffmpeg `-c copy`，不用 GPU）：只合併同一種內容、同解析度的成片。**兒童音樂與小知識：把當晚的 short 與 long 依序串成一支（short 在前、long 在後），xl 不加入合併；對白類：把當晚的 2 支 short 串成一支。**來源是近 6 天內（同一週，不用滑動視窗：上週的來源不會再進這週的合輯）、成片還在 GX10、狀態待審核或已核准的作業（你按「不通過」或 QC 失敗的不會被串進去，所以少了其中一支就只剩 1 支）；不到 2 支就略過。合併身分由「內容種類＋片型組合＋來源作業名稱」決定：來源沒變就不重做，多了新來源才產生新的合併（`<日期>_weekly-short-long`、`<日期>_weekly-trivia-short-long`、`<日期>_weekly-<對白類>-short`，同日再合併加 `-2`）。合併失敗只記進 `history.jsonl`，不會讓當晚被標成 failed。合併結果同樣停在「待審核」，要另外人工核准 |
 | 早上（週二到週六） | 1. 輸入 `videoMaker` 開 TUI，每支一列，看狀態與兩處（GX10／Mac）是否都有<br>2. 若有「QC 失敗」「未完成」，到 `ssh gx10 'tail -40 ~/code/videoMaker/log/vmk-nightly.log'` 看原因<br>3. 選一列按 `d` 下載到 Mac，按 `o` 開啟看片<br>4. 好的按 `a` 核准，不好的按 `x` 不通過（也可以直接按 `u`：未核准時會問你要不要「先核准再上傳」）<br>5. 按 `U` 一次上傳所有已核准的（全部私人）<br>6. 到 YouTube Studio 逐支確認是「私人」且有「為兒童打造」，再手動改成公開或排程<br>7. 看完、傳完的，按 `g` 刪 GX10 的存檔（Mac 已下載時按 `y` 確認；Mac 沒有、那是唯一一份時要輸入 `DELETE`） |
@@ -326,7 +326,7 @@ LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消
 | 內容 | `--kind` | 星期 | 長度／鏡數 | 預設 renderer | 目的 |
 |---|---|---|---|---|---|
 | 兒童英文對話 | `kids_english_dialogue` | 三 | 20～40 秒／3～5 鏡 | `h3_fl2va` | 英文教育（1 個明確學習點、國小程度句型） |
-| 動物短劇 | `animal_sitcom` | 四 | 20～45 秒／3～6 鏡 | `h3_ref2va` | 固定狗狗角色的搞笑日常，角色一致性優先 |
+| 動物短劇 | `animal_sitcom` | 四 | 20～45 秒／3～6 鏡 | `h3_ref2va` | 兩隻哈士奇（`husky_01` Meatball、`husky_02` HappySunny）的搞笑日常，寫實畫風，角色一致性優先 |
 | 有對白的動畫 | `dialogue_animation` | 五 | 30～60 秒／3～6 鏡 | `h3_fl2va` | 故事與角色互動（hook → setup → conflict → reaction → punchline） |
 
 兒童音樂（`kids`）與小知識（`trivia`）的流程完全不變，仍用 Wan，不使用 H3。
@@ -343,13 +343,13 @@ LLM 輸出 JSON，`content.py` 用 pydantic 驗證，失敗把錯誤丟回給 LL
 | 動物短劇 | `episode_title`、`characters`、`setting`、`hook`、`reference_assets`、`duration` | `shot_id`、`duration`、`action`、`emotion`、`camera`、`dialogue`、`reference_assets` |
 | 有對白的動畫 | `title`、`synopsis`、`characters`、`setting`、`duration` | `shot_id`、`duration`、`characters`、`action`、`emotion`、`camera`、`dialogue`、`visual_prompt`、`beats`、`reference_assets` |
 
-程式強制的規則（不靠 LLM 自律）：角色 ID 必須存在於角色庫；說話者必須是該鏡的角色；單鏡 5～15 秒（H3 的訓練範圍）、總長在上表範圍內，`duration` 由程式加總覆寫；語速上限每秒 3 個詞；對白純英文、不含禁用字詞；視覺描述不得出現文字類物件（字幕由程式畫）。兒童英文對話另外要求：一句最多 10 個詞、單字最多 10 個字母、`subtitle` 與 `dialogue` 逐字一致（忽略標點與大小寫）、`vocabulary` 3～8 個且出現在對白裡、至少兩個角色輪流說話、最後一句是問觀眾的問句（含 `you`、以 `?` 結尾）。動物短劇要求至少一隻狗狗角色、每鏡有 `action`／`emotion`／`camera`。有對白的動畫要求至少兩個角色、五個故事段落依序都出現、每鏡都有對白與動作（不能只是站著說話）。YouTube 欄位仍須中英雙語。
+程式強制的規則（不靠 LLM 自律）：角色 ID 必須存在於角色庫；說話者必須是該鏡的角色；單鏡 5～15 秒（H3 的訓練範圍）、總長在上表範圍內，`duration` 由程式加總覆寫；語速上限每秒 3 個詞；對白純英文、不含禁用字詞；視覺描述不得出現文字類物件（字幕由程式畫）。兒童英文對話另外要求：一句最多 10 個詞、單字最多 10 個字母、`subtitle` 與 `dialogue` 逐字一致（忽略標點與大小寫）、`vocabulary` 3～8 個且出現在對白裡、至少兩個角色輪流說話、最後一句是問觀眾的問句（含 `you`、以 `?` 結尾）。動物短劇要求 `characters` 剛好是 `husky_01` 與 `husky_02`（`content.LEADS`）、每鏡有 `action`／`emotion`／`camera`。有對白的動畫要求至少兩個角色、五個故事段落依序都出現、每鏡都有對白與動作（不能只是站著說話）。YouTube 欄位仍須中英雙語。
 
 對白一律英文（字幕用 DejaVu 字型，沒有中文字形；H3 的中文配音能力也未驗證），主題標題與 YouTube 文案是繁體中文。
 
 ### 角色庫
 
-`characters/<id>/character.json` ＋ 參考圖（`front.png`、`side.png`、`happy.png`、`sad.png`…，視角由 `references` 宣告）。目前有 `dog_01`（Mochi，柯基上班族，動物短劇主角）、`dog_02`（Bruno，鬥牛犬老闆）、`bear_01`（Benny）、`rabbit_01`（Rosie）。欄位：`id`、`name`、`species`、`breed`、`appearance`（純英文、每鏡原樣附在提示詞）、`personality`、`accessories`、`voice`（H3 的聲音描述）、`references`。
+`characters/<id>/character.json` ＋ 參考圖（`front.png`、`side.png`、`happy.png`、`sad.png`…，視角由 `references` 宣告）。目前有 `husky_01`（Meatball，黑白異色瞳哈士奇）、`husky_02`（HappySunny，棕白哈士奇）——這兩隻是動物短劇的固定主角，參考圖是從使用者提供的角色設定圖裁出來的寫實照片（`front`／`side`／`happy`），只出現在動物短劇的角色清單；另有卡通角色 `dog_01`（Mochi）、`dog_02`（Bruno）、`bear_01`（Benny）、`rabbit_01`（Rosie），給兒童英文對話與有對白的動畫用。欄位：`id`、`name`、`species`、`breed`、`appearance`（純英文、每鏡原樣附在提示詞）、`personality`、`accessories`、`voice`（H3 的聲音描述）、`references`。
 
 - **只能引用存在的角色 ID**；不存在或寫成別的格式就是驗證失敗，由 LLM 改寫，不會偷偷生成新角色。ID 只接受 `<英文>_<兩位數字>`（擋路徑穿越）。
 - 參考圖是**持久資產**：`videomaker characters build` 只產生缺少的圖，已存在就跳過、`--force` 才覆蓋（`--salt N` 換一組 seed，0 = 預設）；產法：`front` 用 FLUX.1 schnell 文字生圖，其他視角用 Qwen-Image-Edit-2509 從 `front` 編輯而來，各視角才是同一隻角色（seed 由「角色＋視角＋salt」決定）；夜間排程**絕不**生成角色。產生後請人工檢查，不滿意就手動換圖（檔名要與 `references` 一致）。

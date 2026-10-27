@@ -53,17 +53,17 @@ def sitcom():
         }  # fmt: skip
 
     return {
-        "slug": "almost-quitting-time",
+        "slug": "the-last-snack",
         "style": STYLE,
-        "characters": ["dog_01", "dog_02"],
-        "episode_title": "Almost Quitting Time",
-        "setting": "a bright cartoon office with rows of desks",
-        "hook": "One minute before quitting time, the boss walks in.",
+        "characters": ["husky_01", "husky_02"],
+        "episode_title": "The Last Snack",
+        "setting": "a cozy living room with a big sofa",
+        "hook": "Only one snack is left, and two huskies want it.",
         "shots": [
-            shot(1, 6, ["dog_01"], "Mochi sits at a desk and stares at the wall clock", "tired", [("dog_01", "Only one more minute.")]),
-            shot(2, 6, ["dog_01"], "Mochi packs a small bag", "hopeful", [("dog_01", "Home time!")]),
-            shot(3, 7, ["dog_01", "dog_02"], "Bruno walks in with a stack of folders", "cheerful", [("dog_02", "Everyone, one tiny meeting today!")]),
-            shot(4, 6, ["dog_01"], "Mochi slumps onto the desk", "crushed", [("dog_01", "Not again.")]),
+            shot(1, 6, ["husky_01"], "Meatball stares at the last snack on the coffee table", "greedy", [("husky_01", "Only one snack left.")]),
+            shot(2, 6, ["husky_01"], "Meatball sneaks toward the table", "hopeful", [("husky_01", "Nobody is looking.")]),
+            shot(3, 7, ["husky_01", "husky_02"], "HappySunny trots in with a big smile", "cheerful", [("husky_02", "Let us share the snack!")]),
+            shot(4, 6, ["husky_01"], "Meatball slumps onto the sofa", "crushed", [("husky_01", "Not again.")]),
         ],
         "youtube": YT,
     }  # fmt: skip
@@ -109,8 +109,8 @@ def test_valid_scripts_pass_and_become_plans(kind):
 
 def test_shot_prompt_contains_only_the_characters_in_that_shot():
     plan = content.to_plan(content.AnimalSitcom.model_validate(sitcom()), "x")
-    assert "Mochi" in plan.shots[0].prompt and "Bruno" not in plan.shots[0].prompt
-    assert "Mochi" in plan.shots[2].prompt and "Bruno" in plan.shots[2].prompt
+    assert "Meatball" in plan.shots[0].prompt and "HappySunny" not in plan.shots[0].prompt
+    assert "Meatball" in plan.shots[2].prompt and "HappySunny" in plan.shots[2].prompt
 
 
 def test_total_duration_is_computed_by_the_program_not_the_llm():
@@ -167,25 +167,25 @@ def test_speech_rate_shot_length_and_total_are_checked():
     assert "總長" in _bad("animal_sitcom", lambda d: [s.update(duration=15) for s in d["shots"]])
 
     def rushed(d):
-        d["shots"][0]["dialogue"] = [_line("dog_01", " ".join(["blah"] * 14))] * 2
+        d["shots"][0]["dialogue"] = [_line("husky_01", " ".join(["blah"] * 14))] * 2
 
     assert "說不完" in _bad("animal_sitcom", rushed)  # 28 詞 / 6 秒 > 3 詞/秒
 
 
-def test_sitcom_needs_a_dog_action_emotion_camera_and_valid_reference_view():
+def test_sitcom_needs_the_husky_leads_action_emotion_camera_and_valid_reference_view():
     only_bears = lambda d: d.update(characters=["bear_01", "rabbit_01"], shots=story()["shots"])
-    assert "狗" in _bad("animal_sitcom", only_bears)
+    assert "主角固定" in _bad("animal_sitcom", only_bears)
     assert "action、emotion、camera" in _bad("animal_sitcom", lambda d: d["shots"][1].update(camera=""))
-    msg = _bad("animal_sitcom", lambda d: d["shots"][0].update(reference_assets=["dog_01/cry"]))
+    msg = _bad("animal_sitcom", lambda d: d["shots"][0].update(reference_assets=["husky_01/cry"]))
     assert "cry" in msg
-    msg = _bad("animal_sitcom", lambda d: d["shots"][0].update(reference_assets=["dog_02/front"]))
-    assert "不在本集角色" in msg  # 第 1 鏡只有 dog_01 在場
+    msg = _bad("animal_sitcom", lambda d: d["shots"][0].update(reference_assets=["husky_02/front"]))
+    assert "不在本集角色" in msg  # 第 1 鏡只有 husky_01 在場
 
 
 def test_default_reference_assets_use_each_characters_front_view():
     script = content.AnimalSitcom.model_validate(sitcom())
-    assert script.shots[2].reference_assets == ["dog_01/front", "dog_02/front"]
-    assert script.reference_assets == ["dog_01/front", "dog_02/front"]
+    assert script.shots[2].reference_assets == ["husky_01/front", "husky_02/front"]
+    assert script.reference_assets == ["husky_01/front", "husky_02/front"]
 
 
 def test_animation_needs_story_beats_in_order_and_real_action_every_shot():
@@ -274,7 +274,7 @@ def test_plan_music_is_still_required_for_music_kinds_and_old_plans_load():
 def test_dialogue_plans_skip_music_kid_rules_but_music_kinds_keep_them():
     # 兒童音樂規則禁止 mouth/water 等字眼；對白類的角色會開口說話，不套用
     script = sitcom()
-    script["shots"][0]["action"] = "Mochi talks with a happy open mouth beside a water cooler"
+    script["shots"][0]["action"] = "Meatball talks with a happy open mouth beside a water bowl"
     content.to_plan(content.AnimalSitcom.model_validate(script), "x")
     music = {"caption": "x", "bpm": 120, "time_signature": "4/4", "key": "C major"}
     with pytest.raises(ValueError, match="高風險"):
@@ -284,7 +284,7 @@ def test_dialogue_plans_skip_music_kid_rules_but_music_kinds_keep_them():
 
 # ---------- 角色庫 ----------
 def test_shipped_characters_load_and_have_english_only_prompts():
-    assert {"dog_01", "dog_02", "bear_01", "rabbit_01"} <= set(characters.ids())
+    assert {"dog_01", "dog_02", "bear_01", "rabbit_01", "husky_01", "husky_02"} <= set(characters.ids())
     for cid in characters.ids():
         c = characters.load(cid)
         assert c.id == cid and c.appearance.isascii() and c.voice.isascii() and "front" in c.references
@@ -422,12 +422,14 @@ def test_h3_prompt_lists_each_line_with_voice_and_ref2va_maps_pictures():
     ref = renderers.RENDERERS["h3_ref2va"].prompt(plan.script, shot)
     assert "<Picture 1> (front view)" in ref and "<Picture 2> (front view)" in ref
     assert (
-        'Bruno (a deep, slow, booming middle-aged male voice) says clearly: "Everyone, one tiny meeting today!"'
+        'HappySunny (a bright, bubbly, high-energy young adult voice, warm and cheerful) says clearly: "Let us share the snack!"'
         in ref
     )
     assert "no background music" in ref
     fl = renderers.RENDERERS["h3_fl2va"].prompt(plan.script, shot)
-    assert "<Picture" not in fl and "Mochi" in fl and "Bruno" in fl  # fl2va 靠關鍵幀，提示詞直接描述外觀
+    assert (
+        "<Picture" not in fl and "Meatball" in fl and "HappySunny" in fl
+    )  # fl2va 靠關鍵幀，提示詞直接描述外觀
 
 
 class FakeComfy:
@@ -477,12 +479,12 @@ def test_h3_ref2va_render_attaches_only_the_shots_references(tmp_path, monkeypat
     shutil.copytree(
         characters.config.ROOT / "characters", tmp_path / "chars", ignore=shutil.ignore_patterns("*.png")
     )
-    for cid in ("dog_01", "dog_02"):
+    for cid in ("husky_01", "husky_02"):
         (tmp_path / "chars" / cid / "front.png").write_bytes(b"png")
     job, c = _job(tmp_path), FakeComfy()
     r = renderers.RENDERERS["h3_ref2va"]
     assert r.missing_refs(job) == []
-    r.render(job, c, job.plan.shots[0])  # 第 1 鏡只有 dog_01
+    r.render(job, c, job.plan.shots[0])  # 第 1 鏡只有 husky_01
     wf = c.workflows[0]
     assert len(c.uploads) == 1 and "ref1" not in wf and "ref2" not in wf and "ref0" in wf
     assert not any(k.startswith("ref_images.ref_image_1") for n in wf.values() for k in n["inputs"])
@@ -499,7 +501,7 @@ def test_ref2va_reports_missing_reference_images_before_any_gpu_work(tmp_path, m
         characters.config.ROOT / "characters", tmp_path / "chars", ignore=shutil.ignore_patterns("*.png")
     )
     job = _job(tmp_path)
-    assert renderers.RENDERERS["h3_ref2va"].missing_refs(job) == ["dog_01/front", "dog_02/front"]
+    assert renderers.RENDERERS["h3_ref2va"].missing_refs(job) == ["husky_01/front", "husky_02/front"]
     assert renderers.RENDERERS["h3_fl2va"].missing_refs(job) == []  # fl2va 不用參考圖
 
 
@@ -557,7 +559,7 @@ def test_reference_assets_default_to_front_or_first_view_and_are_capped_at_three
     msg = _bad(
         "animal_sitcom",
         lambda d: d["shots"][2].update(
-            reference_assets=["dog_01/front", "dog_01/sad", "dog_01/happy", "dog_02/front"]
+            reference_assets=["husky_01/front", "husky_01/sad", "husky_01/happy", "husky_02/front"]
         ),
     )
     assert "最多 3 張" in msg
@@ -616,3 +618,24 @@ def test_character_build_frees_comfyui_even_when_a_generation_fails(tmp_path, mo
     with pytest.raises(RuntimeError, match="逾時"):
         characters.build(comfy=Boom())
     assert events[-1] == "free" and (tmp_path / "bear_01" / "front.png").exists()  # 已產生的保留，並且有卸載
+
+
+def test_animal_sitcom_cast_is_exactly_the_two_husky_leads():
+    def solo(d):  # 只剩 Meatball：第 3 鏡也改成他自己說話
+        d["characters"] = ["husky_01"]
+        d["shots"][2].update(characters=["husky_01"], dialogue=[_line("husky_01", "Let us share the snack!")])
+
+    assert "主角固定" in _bad("animal_sitcom", solo)
+    assert "主角固定" in _bad(
+        "animal_sitcom", lambda d: d.update(characters=["husky_01", "husky_02", "dog_01"])
+    )
+
+
+def test_catalog_shows_leads_only_to_animal_sitcom():
+    assert "husky_01" in content.catalog("animal_sitcom") and "bear_01" not in content.catalog(
+        "animal_sitcom"
+    )
+    for kind in ("kids_english_dialogue", "dialogue_animation"):
+        assert "husky" not in content.catalog(kind) and "bear_01" in content.catalog(kind)
+    assert "photorealistic" in content.system_prompt("animal_sitcom")
+    assert "flat 2D cartoon" in content.system_prompt("dialogue_animation")
