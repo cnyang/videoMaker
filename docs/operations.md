@@ -630,7 +630,7 @@ ssh gx10 'cd ~/code/videoMaker && VMK_COMFY_URL=http://127.0.0.1:8188 .venv/bin/
 - 套件新增依賴後，GX10 的 venv 要手動 `pip install`（例如 `google-api-python-client`、`google-auth-oauthlib` 已裝）。
 - 設定的 workflow 是 ComfyUI API 格式，放在 `workflows/*.json`；要替換的節點欄位記在 `workflow_map.yaml`。
 - GX10 沒有 git repo（rsync 不帶 `.git`），所以 `meta.json` 的 `git` 欄位在 GX10 上是 `no-commit`。
-- **ComfyUI 版本釘在 v0.41.3**（2026-10-20 由 v0.33.0 升級，為了 FLUX.3 的 `CLIPLoader type=flux3`）：`~/code/comfyui-docker/Dockerfile` 的 `ARG COMFY_REF`，要升級就改它再 `docker compose build && docker compose up -d`（先確認佇列空、不在夜間時段）。回滾：把 `comfyui-docker-comfyui:pre-flux3-20261020` 標回 `latest` 後 `docker compose up -d`。`custom_nodes/ComfyUI-LTXVideo` 在新版 import 失敗，LTX 本來就在禁用清單、沒有 workflow 用到，不用修。
+- **ComfyUI 版本釘在 v0.43.0**（2026-10-27 由 v0.41.3 升級，為了 MOSS-Image 原生支援；v0.41.3 是 2026-10-20 由 v0.33.0 升級，為了 FLUX.3 的 `CLIPLoader type=flux3`）：`~/code/comfyui-docker/Dockerfile` 的 `ARG COMFY_REF`，要升級就改它再 `docker compose build && docker compose up -d`（先確認佇列空、不在夜間時段）。升級後 `CLIPLoader` 仍有 `flux3`，既有 `workflows/*.json` 的節點都在；兒童音樂 short 已實跑通過（2026-10-27 `little-bear-brushing-song`，clips 1680.9s，與升級前相當，QC 全過），小知識（schnell）與兩狗合成（Qwen-Image-Edit）**尚未實跑驗證**。回滾：把 `comfyui-docker-comfyui:pre-v043-20261027`（v0.41.3）標回 `latest` 後 `docker compose up -d`；更早的 v0.33.0 是 `pre-flux3-20261020`。`custom_nodes/ComfyUI-LTXVideo` 在新版 import 失敗，LTX 本來就在禁用清單、沒有 workflow 用到，不用修。
 - `test_workflows_match_live_object_info` 會展開動態 combo（`TextGenerate` 的 `sampling_mode.*` 子欄位）與動態長出的輸入（H3 的 `ref_images.ref_image_N`）。
 - **回滾（新排程與對白類）**：改回舊 crontab 三行（見[夜間排程](#夜間排程)）即可恢復舊行為；程式本身向下相容——舊 `plan.json`、舊 `history.jsonl` 都能讀，`nightly --kind kids|trivia` 與 `weekly` 指令照舊可用，`git revert` 該次提交也能完整退回。已產生的對白類作業與合併作業不受影響（可從 TUI 刪除）。
 

@@ -100,7 +100,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 **關鍵幀（pipeline.keyframes）**
 - 兒童音樂走 `workflow_map.yaml` 的 `keyframe_flux3`（FLUX.3 Image Klein，提示詞先經 upsampler 擴寫），小知識維持 `keyframe`（schnell）：2026-10-20 A/B（6 鏡）FLUX.3 構圖與場景明顯較好，但水獺會畫得像海豹，物種外觀對小知識風險較高，所以沒換。依 `plan.kind` 分流。
 - **upsampler 不可拿掉**：官方說不用結果明顯較弱，實測無 upsampler 還會出現白色上下邊（現在有 `_has_white_bars` 擋，但別因此拿掉 upsampler）。擴寫後的 caption 從 history 的 `pup_text`（`PreviewAny`）取回，存進 `meta.json` 的 `shots[].upsampled`（授權證據）。
-- ComfyUI 釘在 v0.41.3（FLUX.3 要 `CLIPLoader type=flux3`），升級與回滾見 operations.md#部署與開發。
+- ComfyUI 釘在 v0.43.0（2026-10-27 升級；FLUX.3 要 `CLIPLoader type=flux3`，v0.43.0 仍有，兒童音樂 short 已實跑通過；小知識與兩狗合成尚未實跑驗證），升級與回滾見 operations.md#部署與開發。
 - 2026-10-20 在 GX10 實測（獨立工作目錄，作業 `little-bear-bouncing-ball` 的 plan）：14 鏡關鍵幀 466 秒（≈33 秒/張，`nightly.KEYFRAME_SEC` 取 35）、0 次黑白邊重生、14/14 有 `upsampled`；用這些關鍵幀跑 2 鏡 Wan 各約 334 秒（與 schnell 版的 346 秒相當），抽幀對照 4.8 秒內角色與背景穩定，沒有比 schnell 版差（樣本只有 2 鏡，人工看片仍不可省）。
 - 記憶體峰值（相對基線 52.8GB）：FLUX.3＋upsampler 37.4GB、Wan 29.6GB，所以關鍵幀階段多要 `pipeline.FLUX3_EXTRA_GB`（8GB）；`VMK_MIN_FREE_GB` 的基準沒有降低。
 - 黑邊與白邊都會換 seed 重生：`_has_white_bars` 用 `negate`＋cropdetect，只認「橫跨整張寬、上下都有」的白帶，白色背景的圖不會誤判（19 張實測圖只標出該標的 1 張）。
