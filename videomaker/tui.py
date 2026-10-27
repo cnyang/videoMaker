@@ -100,6 +100,8 @@ class VM(App):
     """
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("r", "refresh", "重新整理"),
+        Binding("space", "toggle_select", "勾選"),
+        Binding("escape", "clear_selection", "清除勾選", show=False),
         Binding("d", "download", "下載到Mac"),
         Binding("o", "open_local", "開啟"),
         Binding("a", "approve", "核准"),
@@ -116,6 +118,7 @@ class VM(App):
         super().__init__()
         self.data: list[dict] = []
         self.viewed: dict[str, str] = {}  # 核准只能使用這次開啟播放的版本，不能拿 GX10 的新成片冒充
+        self.selected: set[str] = set()  # 勾選的作業名稱；目前只給批次刪除（g／m）使用
 
     # ----- 畫面 -----
     def compose(self) -> ComposeResult:
@@ -140,20 +143,26 @@ class VM(App):
         self.notify(msg, severity="error" if error else "information", timeout=10 if error else 5)
 
     def fill(self, rows: list[dict]) -> None:
-        table = self.query_one(DataTable)
         cur = self.current()
-        keep = cur["name"] if cur else None
         self.data = rows
+        self.selected &= {r["name"] for r in rows}  # 已經不存在的作業不保留勾選
+        self.redraw(cur["name"] if cur else None)
+
+    def redraw(self, keep: str | None = None) -> None:
+        """依 self.data 與 self.selected 重畫表格，游標停回 keep。"""
+        table = self.query_one(DataTable)
         table.clear()
-        for r in rows:
+        for r in self.data:
+            mark = "✓ " if r["name"] in self.selected else ""
             table.add_row(
-                state_text(r), visual_text(r), r["topic"], r["format"], f"{r['duration']:.0f}s" if r["duration"] else "-", _mb(r["size"]),
+                mark + state_text(r), visual_text(r), r["topic"], r["format"], f"{r['duration']:.0f}s" if r["duration"] else "-", _mb(r["size"]),
                 r["youtube_id"] or "-", *("●" if r[k] else "·" for k in ("gx10", "mac")), r["name"], key=r["name"],
             )  # fmt: skip
-        if keep and any(r["name"] == keep for r in rows):
+        if keep and any(r["name"] == keep for r in self.data):
             table.move_cursor(row=table.get_row_index(keep))
+        picked = f"　已勾選 {len(self.selected)} 支（g／m 批次刪除，Esc 清除）" if self.selected else ""
         self.query_one("#status", Static).update(
-            f"{len(rows)} 筆　●=該處有　·=沒有（GX10 ／ Mac）　Enter=詳情"
+            f"{len(self.data)} 筆　●=該處有　·=沒有（GX10 ／ Mac）　Enter=詳情　空白=勾選{picked}"
         )
 
     def current(self) -> dict | None:
@@ -316,7 +325,71 @@ class VM(App):
             lambda: self.run_task("上傳全部已核准", lambda: jobs.remote_cli("upload-approved")),
         )
 
+    def action_toggle_select(self) -> None:
+        r = self.current()
+        if not r:
+            return
+        self.selected ^= {r["name"]}
+        self.redraw(r["name"])
+        self.query_one(DataTable).action_cursor_down()  # 連按空白可以一路往下勾
+
+    def action_clear_selection(self) -> None:
+        if self.selected:
+            self.selected.clear()
+            cur = self.current()
+            self.redraw(cur["name"] if cur else None)
+
+    def _delete_selected(self, side: str) -> None:
+        """批次刪除勾選的作業（單一確認）；進行中、該處沒有存檔的略過。有任何一支是唯一一份就要輸入 DELETE。"""
+        gx = side == "gx10"
+        where = "GX10" if gx else "Mac"
+        have = "gx10" if gx else "mac"
+        picked = [r for r in self.data if r["name"] in self.selected]
+        todo = [r for r in picked if r[have] and not r["active"]]
+        if not todo:
+            return self.say(f"勾選的作業在 {where} 都不能刪（沒有存檔，或可能還在執行中）", True)
+        # 唯一一份的判斷與單筆刪除相同：刪 GX10 看 Mac 有沒有；刪 Mac 看 GX10 有沒有成片
+        only = [r for r in todo if (not r["mac"] if gx else not (r["gx10"] and r["size"]))]
+        shown = [
+            f"  {escape(r['name'])}（{escape(r['topic'])}）{' [red]唯一一份[/red]' if r in only else ''}"
+            for r in todo[:10]
+        ]
+        if len(todo) > 10:
+            shown.append(f"  …另 {len(todo) - 10} 支")
+        lines = [f"永久刪除 {where} 上這 {len(todo)} 支作業的整個資料夾？", *shown]
+        if len(picked) > len(todo):
+            lines.append(f"（另 {len(picked) - len(todo)} 支沒有 {where} 存檔或可能還在執行中，已略過）")
+        lines.append(
+            "（已上傳的 YouTube 影片不受影響）" if gx else "（GX10 與 YouTube 不受影響，不經垃圾桶）"
+        )
+        if only:
+            lines.append(f"[b][red]其中 {len(only)} 支是唯一一份，刪了就回不來。[/red][/b]")
+
+        def run() -> str:
+            failed = []
+            for r in todo:
+                try:
+                    (jobs.delete_gx10 if gx else jobs.delete_local)(r["name"])
+                except Exception as e:  # noqa: BLE001 單支失敗不中斷其餘，最後一起回報
+                    failed.append(f"{r['name']}：{e}")
+                else:
+                    # 失敗的保留勾選，方便重試；用 lambda 是因為 call_from_thread 取不到內建方法 set.discard 的簽名
+                    self.call_from_thread(lambda name=r["name"]: self.selected.discard(name))
+            if failed:
+                raise RuntimeError(
+                    f"成功 {len(todo) - len(failed)} 支、失敗 {len(failed)} 支\n" + "\n".join(failed)
+                )
+            return f"{len(todo)} 支"
+
+        self.ask(
+            "\n".join(lines),
+            lambda: self.run_task(f"批次刪除 {where} 存檔", run),
+            require="DELETE" if only else None,
+        )
+
     def action_delete_gx10(self) -> None:
+        if self.selected:
+            return self._delete_selected("gx10")
         r = self.current()
         if not r:
             return
@@ -337,6 +410,8 @@ class VM(App):
         self.run_task("檢查／更新 YouTube token", youtube.renew_token)
 
     def action_delete_local(self) -> None:
+        if self.selected:
+            return self._delete_selected("mac")
         r = self.current()
         if not r:
             return

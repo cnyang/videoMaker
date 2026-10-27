@@ -421,6 +421,82 @@ def test_tui_delete_local_failure_keeps_row_and_reports_error(monkeypatch):
     assert any(error and "Permission denied" in message for message, error in messages)
 
 
+def test_tui_space_toggles_selection_and_escape_clears(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0]), _row(GOOD[1]), _row(GOOD[2])])
+    seen = {}
+
+    def snap(app):
+        table = app.query_one(tui.DataTable)
+        seen["marks"] = [str(table.get_row_at(i)[0]).startswith("✓") for i in range(3)]
+        seen["cursor"] = table.cursor_row
+
+    app = drive(env, "space space", snap)
+    assert app.selected == {GOOD[0], GOOD[1]}
+    assert seen["marks"] == [True, True, False] and seen["cursor"] == 2  # 勾選後游標自動下移
+    app = drive(env, "space up space")  # 再按一次就取消
+    assert app.selected == set()
+    app = drive(env, "space space escape")
+    assert app.selected == set()
+
+
+def test_tui_batch_delete_gx10_uses_one_confirmation_for_all_selected(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True), _row(GOOD[1], mac=True), _row(GOOD[2], mac=True)])
+    app = drive(env, "space space g n")
+    assert env.calls == [] and app.selected == {GOOD[0], GOOD[1]}  # 取消：什麼都不刪，勾選保留
+    app = drive(env, "space space g y")
+    assert env.calls == [("del_gx10", GOOD[0]), ("del_gx10", GOOD[1])]  # 第 3 筆沒勾選，不能被刪
+    assert app.selected == set()
+
+
+def test_tui_batch_delete_skips_active_and_missing_copies(monkeypatch):
+    env = Env(
+        monkeypatch,
+        [_row(GOOD[0], mac=True), _row(GOOD[1], None, active=True), _row(GOOD[2], gx10=False, mac=True)],
+    )
+    drive(env, "space space space g y")
+    assert env.calls == [("del_gx10", GOOD[0])]  # 進行中、GX10 本來就沒有的都略過
+    env = Env(monkeypatch, [_row(GOOD[0], None, active=True)])
+    drive(env, "space g y")
+    assert env.calls == []  # 全部都不能刪：不會跳確認，也不會刪
+
+
+def test_tui_batch_delete_with_any_unique_copy_requires_typing_DELETE(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True), _row(GOOD[1], mac=False)])
+    drive(env, "space space g y enter")  # 其中一支是唯一一份：單按 y 不夠
+    assert env.calls == []
+    drive(env, "space space g y enter g D E L E T E enter")
+    assert env.calls == [("del_gx10", GOOD[0]), ("del_gx10", GOOD[1])]
+
+
+def test_tui_batch_delete_local_and_partial_failure_keeps_failed_selected(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True), _row(GOOD[1], mac=True)])
+    drive(env, "space space m y")
+    assert env.calls == [("del_mac", GOOD[0]), ("del_mac", GOOD[1])]
+
+    def flaky(name):
+        if name == GOOD[1]:
+            raise PermissionError("Permission denied")
+        env.calls.append(("del_mac", name))
+
+    env = Env(monkeypatch, [_row(GOOD[0], mac=True), _row(GOOD[1], mac=True)])
+    monkeypatch.setattr(jobs, "delete_local", flaky)
+    messages = []
+    original_say = tui.VM.say
+    monkeypatch.setattr(
+        tui.VM, "say", lambda app, m, error=False: (messages.append((m, error)), original_say(app, m, error))
+    )
+    app = drive(env, "space space m y")
+    assert env.calls == [("del_mac", GOOD[0])]  # 一支失敗不中斷其餘
+    assert app.selected == {GOOD[1]}  # 失敗的保留勾選，方便重試
+    assert any(error and GOOD[1] in m and "Permission denied" in m for m, error in messages)
+
+
+def test_tui_selection_drops_jobs_that_disappear_on_refresh(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0]), _row(GOOD[1])])
+    app = drive(env, "space space", lambda app: setattr(env, "rows", [_row(GOOD[1])]), "r")
+    assert app.selected == {GOOD[1]}
+
+
 def test_tui_has_no_nas_actions():
     assert not hasattr(tui.VM, "action_delete_nas") and "n" not in {b.key for b in tui.VM.BINDINGS}
 
