@@ -20,7 +20,10 @@ JOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(-[a-z0-9]+)*$")
 GX10 = os.getenv("VMK_GX10", "gx10")  # ssh 別名
 GX10_PROJECT = "~/code/videoMaker"
 LOCAL = Path(os.getenv("VMK_LOCAL_DIR", "~/Downloads/videoMaker")).expanduser()  # 下載到 Mac 的位置
-ACTIVE_SECONDS = 600  # 沒有 status.json 且 10 分鐘內有檔案更新 → 視為還在跑，不允許刪除或審核
+ACTIVE_SECONDS = 600  # visual_qc.json 停在 running 超過 10 分鐘沒進度 → 視為檢查中斷（逐張寫入，間隔短）
+# 沒有 status.json 且 30 分鐘內有檔案更新 → 視為還在跑，不允許刪除或審核。
+# 單支 Wan 片段約 15–20 分鐘才寫出檔案（2026-10-23 實測最長 19 分 52 秒），10 分鐘會在空檔期把生成中的作業當成沒在跑。
+JOB_ACTIVE_SECONDS = 30 * 60
 
 STATE_ZH = {
     "pending_review": "待審核",
@@ -94,7 +97,7 @@ def inventory() -> list[dict]:
                 "photo": bool(meta.get("images")),
                 "visual_qc": visual,
                 "active": (st is None or visual.get("status") == "running")
-                and time.time() - newest < ACTIVE_SECONDS,
+                and time.time() - newest < JOB_ACTIVE_SECONDS,
             }
         )
     return out

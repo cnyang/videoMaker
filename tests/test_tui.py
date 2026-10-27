@@ -132,6 +132,21 @@ def test_inventory_marks_active_and_unfinished_jobs(tmp_path, monkeypatch):
     assert by["stale"]["active"] is False and by["stale"]["status"] is None
 
 
+@pytest.mark.parametrize("age_minutes,active", [(20, True), (31, False)])
+def test_inventory_keeps_job_active_during_a_long_clip(tmp_path, monkeypatch, age_minutes, active):
+    # 單支 Wan 片段約 20 分鐘才寫檔；生成中途不能被當成沒在跑（否則 TUI 會允許刪除或審核）。
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    d = tmp_path / "2026-10-23_clip"
+    d.mkdir()
+    (d / "plan.json").write_text(json.dumps({"topic": "主題", "youtube": {"title": "標題"}}))
+    (d / "meta.json").write_text(json.dumps({"format": "short"}))
+    t = time.time() - age_minutes * 60
+    for f in [d, *d.rglob("*")]:
+        os.utime(f, (t, t))
+    (row,) = jobs.inventory()
+    assert row["active"] is active
+
+
 def test_rows_merges_gx10_and_mac_including_mac_only(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "LOCAL", tmp_path)
     mac_only = tmp_path / GOOD[2]
