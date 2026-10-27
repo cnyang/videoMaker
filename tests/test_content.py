@@ -422,7 +422,7 @@ def test_h3_prompt_lists_each_line_with_voice_and_ref2va_maps_pictures():
     ref = renderers.RENDERERS["h3_ref2va"].prompt(plan.script, shot)
     assert "<Picture 1> (front view)" in ref and "<Picture 2> (front view)" in ref
     assert (
-        'HappySunny (a bright, bubbly, high-energy young adult voice, warm and cheerful) says clearly: "Let us share the snack!"'
+        'HappySunny (a bright, bubbly, high-energy young female voice, sweet and cheerful like a young girl) says clearly: "Let us share the snack!"'
         in ref
     )
     assert "no background music" in ref
