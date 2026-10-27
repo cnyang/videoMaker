@@ -265,10 +265,11 @@ def test_tui_lists_rows_with_state_and_locations(monkeypatch):
             cols=[str(c.label) for c in app.query_one(tui.DataTable).columns.values()],
         ),
     )
-    assert seen["rows"][0][0] == "已上傳" and seen["rows"][0][-3:-1] == ["●", "●"]  # GX10、Mac 都有
-    assert seen["rows"][1][0] == "待審核" and seen["rows"][1][-3:-1] == ["·", "·"]  # 只驗欄位數
+    assert seen["rows"][0][1] == "已上傳" and seen["rows"][0][-3:-1] == ["●", "●"]  # GX10、Mac 都有
+    assert seen["rows"][1][1] == "待審核" and seen["rows"][1][-3:-1] == ["·", "·"]  # 只驗欄位數
     assert "NAS" not in seen["cols"] and seen["cols"][-3:] == ["GX10", "Mac", "資料夾"]
-    assert seen["rows"][2][0] == "已核准"
+    assert seen["rows"][2][1] == "已核准"
+    assert seen["cols"][0] == "選" and [r[0] for r in seen["rows"]] == ["⬜"] * 3  # 勾選欄固定顯示，沒勾也在
 
 
 def test_tui_approve_reject_and_guards(monkeypatch):
@@ -427,12 +428,12 @@ def test_tui_space_toggles_selection_and_escape_clears(monkeypatch):
 
     def snap(app):
         table = app.query_one(tui.DataTable)
-        seen["marks"] = [str(table.get_row_at(i)[0]).startswith("✓") for i in range(3)]
+        seen["marks"] = [table.get_row_at(i)[0] for i in range(3)]
         seen["cursor"] = table.cursor_row
 
     app = drive(env, "space space", snap)
     assert app.selected == {GOOD[0], GOOD[1]}
-    assert seen["marks"] == [True, True, False] and seen["cursor"] == 2  # 勾選後游標自動下移
+    assert seen["marks"] == ["✅", "✅", "⬜"] and seen["cursor"] == 2  # 勾選後游標自動下移
     app = drive(env, "space up space")  # 再按一次就取消
     assert app.selected == set()
     app = drive(env, "space space escape")
@@ -602,7 +603,7 @@ def test_tui_renders_visual_status_scores_locations_and_errors(monkeypatch):
         seen["detail"] = "\n".join(w.visual.plain for w in app.screen.query(tui.Static))
 
     drive(env, capture, "enter", detail, "escape")
-    assert "視覺 QC" in seen["columns"] and seen["row"][1] == "有疑慮 83%"
+    assert "視覺 QC" in seen["columns"] and seen["row"][2] == "有疑慮 83%"
     assert all(
         t in seen["detail"] for t in ("畫面變形", "83.0%", "clips/03.mp4", "2.50 秒", "[red]", "仍需人工看片")
     )

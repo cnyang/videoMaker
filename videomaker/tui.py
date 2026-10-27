@@ -129,7 +129,7 @@ class VM(App):
 
     def on_mount(self) -> None:
         self.query_one(DataTable).add_columns(
-            "狀態", "視覺 QC", "主題", "片型", "長度", "大小", "YouTube", "GX10", "Mac", "資料夾"
+            "選", "狀態", "視覺 QC", "主題", "片型", "長度", "大小", "YouTube", "GX10", "Mac", "資料夾"
         )
         self.action_refresh()
         self.set_interval(REFRESH_SECONDS, self.action_refresh)
@@ -153,9 +153,8 @@ class VM(App):
         table = self.query_one(DataTable)
         table.clear()
         for r in self.data:
-            mark = "✓ " if r["name"] in self.selected else ""
             table.add_row(
-                mark + state_text(r), visual_text(r), r["topic"], r["format"], f"{r['duration']:.0f}s" if r["duration"] else "-", _mb(r["size"]),
+                "✅" if r["name"] in self.selected else "⬜", state_text(r), visual_text(r), r["topic"], r["format"], f"{r['duration']:.0f}s" if r["duration"] else "-", _mb(r["size"]),
                 r["youtube_id"] or "-", *("●" if r[k] else "·" for k in ("gx10", "mac")), r["name"], key=r["name"],
             )  # fmt: skip
         if keep and any(r["name"] == keep for r in self.data):
