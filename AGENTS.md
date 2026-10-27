@@ -73,7 +73,7 @@ characters/          固定角色庫（對白類共用，見 characters/README.m
 
 ```
 plan.json + meta.json 存在      → 作業存在
-無 status.json                  → 未完成／進行中（10 分鐘內有檔案更新視為進行中，jobs.ACTIVE_SECONDS）
+無 status.json                  → 未完成／進行中（30 分鐘內有檔案更新視為進行中，jobs.JOB_ACTIVE_SECONDS；單支 Wan 片段要 15–20 分鐘才寫檔）
 status.json.status              → pending_review → approved | rejected；QC 沒過是 failed
 meta.json.youtube_id            → 已上傳（upload 靠它做冪等）
 meta.json.images                → 照片模式
