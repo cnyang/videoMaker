@@ -24,7 +24,7 @@ CRED_DIR = Path(os.getenv("VMK_YT_DIR", "~/.config/videomaker")).expanduser()
 CLIENT_SECRET = CRED_DIR / "client_secret.json"
 TOKEN = CRED_DIR / "token.json"
 CATEGORY = "10"  # Music
-NOT_FOR_KIDS = ("animal_sitcom", "dialogue_animation")  # 這兩種不是兒童內容，不宣告 selfDeclaredMadeForKids
+NOT_FOR_KIDS = ("animal_sitcom", "dialogue_animation")  # 非兒童內容：明確送 selfDeclaredMadeForKids=False
 TRANSIENT = (500, 502, 503, 504)
 
 
@@ -75,8 +75,8 @@ def build_body(plan: Plan, meta: dict) -> dict:
         },
         "status": {
             "privacyStatus": "private",  # 永遠私人：由人在 Studio 審核後手動公開
-            # 動物短劇與有對白的動畫不是兒童內容：不宣告，公開前在 Studio 自行選受眾
-            **({} if plan.kind in NOT_FOR_KIDS else {"selfDeclaredMadeForKids": True}),
+            # 動物短劇與有對白的動畫不是兒童內容：要明確送 False；不送的話 YouTube 會套用頻道預設（頻道預設是「為兒童打造」）
+            "selfDeclaredMadeForKids": plan.kind not in NOT_FOR_KIDS,
             # 照片模式是「真實照片經 AI 動畫化」，寫實風格依 spec 設為 true；純卡通不設
             "containsSyntheticMedia": bool(meta.get("images")),
         },

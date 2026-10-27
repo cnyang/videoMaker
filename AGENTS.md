@@ -118,7 +118,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 - 來源由程式寫進 `plan.sources` 與 YouTube 說明欄，**不要改成採用 LLM 填的網址**；`plan.topic` 由程式覆寫成條目標題（`--resume` 靠 topic 找作業）。
 - 英文字幕在 `pipeline.caption_filters`（ffmpeg `drawtext`，GX10 有、Mac 沒有）；字型走 `VMK_FONT`。`plan.FACTS_PER` 同時決定「支援哪些片型」（short、long，沒有 xl）與每支幾則，`plan.KINDS` 是每日合併與夜間排程共用的「內容種類 → 片型」表。
 - 兒童音樂的呼叫路徑刻意沒變：`new_job` 只在小知識時才把 `article`／`n_facts` 傳給 `make_plan`，`nightly` 只在小知識時才把 `kind` 傳給 `pipeline.run`。`history.jsonl` 的 `kind` 缺省視為 `kids`（舊紀錄）。
-- 上傳仍然一律私人、人工核准；`selfDeclaredMadeForKids: True` 只對兒童內容（`youtube.NOT_FOR_KIDS` 的動物短劇與有對白的動畫不宣告，公開前在 Studio 自選受眾）。
+- 上傳仍然一律私人、人工核准；`selfDeclaredMadeForKids: True` 只對兒童內容（`youtube.NOT_FOR_KIDS` 的動物短劇與有對白的動畫明確送 `False`；不能省略，省略會套用頻道預設「為兒童打造」）。
 
 **對白類（content.py／dialogue.py／renderers.py／characters.py）**
 - `Plan.script` 存通過驗證的結構化腳本；`Plan.music` 因此改成選填（`_music_required` 只對 kids／trivia 強制），舊 `plan.json` 完全相容。`Plan._content_rules`（禁 mouth／water 等字眼、道具顏色…）**只套用在 kids／trivia**：對白類角色要開口說話，這組規則為「無旁白音樂短片」訂的，不能套。
@@ -184,7 +184,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 - 下列 80 張校準數據屬於舊抽幀規則，人工標記與模型畫面可能相差約 0.21 秒，須以新抽樣版本重查、重新人工標記後才能下結論；本次保留 20% 門檻，未自動重查或重設既有核准。
 - 視覺 QC 是 clef-flash 每秒 2 張的初篩，門檻 20%（原 50%，實測 38% 的融合畫面會被放行）。2026-10-16 用 80 張人工標記（3 張有問題）初步驗證：20% 在 4 支作業上只標出 1 支（唯一明顯壞掉的），再降到 10% 會標出全部作業（4.2% 的畫面）卻只多抓 1 張；偵測器對細微缺陷幾乎無感（AUC 0.74、n 太小），所以門檻維持 20%（標記流程見 operations.md 的「校準門檻」），短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
 - **對白類尚未端到端實跑**：H3 已放行，權重 2026-10-22 起在 GX10 背景下載；`workflows/h3_*.json` 只通過 `/object_info` 結構檢查，沒有 GPU 驗證。第一次實跑要在非夜間時段手動做（實測記憶體峰值與每鏡耗時、校準 `VMK_H3_EXTRA_GB`／`VMK_H3_SEC_PER_SEC`），步驟見 operations.md#啟用-h3-的前置條件。腳本企劃（LLM＋驗證）已用真實 LLM 對三種內容做過 `--dry-run`。
-- 兒童英文對話沿用 `selfDeclaredMadeForKids: True`；動物短劇與有對白的動畫不宣告（不是兒童內容），公開前要在 Studio 自選受眾。YouTube 分類目前一律是 Music（10），對白類公開前也要在 Studio 改。
+- 兒童英文對話沿用 `selfDeclaredMadeForKids: True`；動物短劇與有對白的動畫明確送 `selfDeclaredMadeForKids: False`（不是兒童內容；2026-10-27 起，之前是省略，會套用頻道預設「為兒童打造」，當天已上傳的兩支哈士奇要在 Studio 手動改）。YouTube 分類目前一律是 Music（10），對白類公開前也要在 Studio 改。
 - GX10 的 crontab 已於 2026-10-22 換成 `nightly --kind auto` 單行（舊的 `1,3`／`2,4`／週五 `weekly` 三行備份在 GX10 的 `~/crontab.backup-20261022`，回滾見 operations.md#夜間排程）。H3 權重下載完成前，週三到週五只會記 `skipped`。
 - Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
 - 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。

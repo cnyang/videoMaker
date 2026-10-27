@@ -1227,14 +1227,14 @@ def _yt_job(tmp_path, status="approved", images=None):
     return d
 
 
-def test_youtube_body_omits_the_kids_declaration_for_non_kids_content(tmp_path):
+def test_youtube_body_declares_not_made_for_kids_for_non_kids_content(tmp_path):
     from videomaker import youtube
 
     plan = Plan.model_validate_json((_yt_job(tmp_path) / "plan.json").read_text())
     for kind, kids in [("kids", True), ("trivia", True), ("kids_english_dialogue", True),
                        ("animal_sitcom", False), ("dialogue_animation", False)]:  # fmt: skip
         status = youtube.build_body(plan.model_copy(update={"kind": kind}), {})["status"]
-        assert ("selfDeclaredMadeForKids" in status) is kids, kind
+        assert status["selfDeclaredMadeForKids"] is kids, kind  # 非兒童內容要明確送 False，不能省略
         assert status["privacyStatus"] == "private"  # 不論種類，上傳一律私人
 
 

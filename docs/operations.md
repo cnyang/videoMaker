@@ -211,7 +211,7 @@ videoMaker upload <資料夾名>        # 只上傳這一支（必須已核准�
 videoMaker upload-approved          # 上傳所有「已核准、尚未上傳」的
 ```
 
-- 上傳內容：`privacyStatus = private`、`selfDeclaredMadeForKids = true`（兒童內容）、分類 Music；動物短劇與有對白的動畫**不送** `selfDeclaredMadeForKids`（不是兒童內容，公開前在 Studio 選受眾）；標題、說明、標籤取自 `plan.json` 的 `youtube`；**照片模式**的影片會加上 `containsSyntheticMedia = true`（真實照片經 AI 動畫化）。
+- 上傳內容：`privacyStatus = private`、`selfDeclaredMadeForKids = true`（兒童內容）、分類 Music；動物短劇與有對白的動畫明確送 `selfDeclaredMadeForKids = false`（不是兒童內容；不送的話 YouTube 會套用頻道預設「為兒童打造」）；標題、說明、標籤取自 `plan.json` 的 `youtube`；**照片模式**的影片會加上 `containsSyntheticMedia = true`（真實照片經 AI 動畫化）。
 - 冪等：已上傳過的不會重複上傳（`meta.json` 會記 `youtube_id`、`youtube_uploaded_at`、`youtube_privacy`）。
 - `upload-approved` 一支失敗不會擋其他支；失敗的下次重跑即可。
 - 上傳的影片網址：`https://studio.youtube.com/video/<影片 ID>/edit`。
@@ -411,7 +411,7 @@ videoMaker make "<主題>" --kind animal_sitcom --stage clips
 3. 下載完成後 `videomaker check` 確認模型都看得到（H3 預設啟用，不需設環境變數；`VMK_H3_ENABLED=0` 才是關閉）。
 4. 在非夜間時段手動實跑一支（`make … --kind animal_sitcom`），量記憶體峰值與每鏡耗時，校準 `VMK_H3_EXTRA_GB`、`VMK_H3_SEC_PER_SEC`，並確認 workflow（取樣器、步數、解析度 `VMK_H3_SIZE`）與提示詞寫法的實際效果。
 5. ✅ `characters build` 已產生參考圖（2026-10-22），人工檢查通過後才用於正式排程。
-6. 檢查 YouTube 設定：動物短劇與有對白的動畫已不送 `selfDeclaredMadeForKids`（公開前在 Studio 選受眾）；`containsSyntheticMedia` 只在照片模式為 True，H3 輸出是 AI 合成的影音，公開前請在 Studio 自行確認；分類目前一律是 Music，對白類公開前請改。
+6. 檢查 YouTube 設定：動物短劇與有對白的動畫已明確送 `selfDeclaredMadeForKids = false`；`containsSyntheticMedia` 只在照片模式為 True，H3 輸出是 AI 合成的影音，公開前請在 Studio 自行確認；分類目前一律是 Music，對白類公開前請改。
 
 ---
 
