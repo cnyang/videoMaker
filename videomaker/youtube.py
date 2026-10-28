@@ -105,20 +105,52 @@ def _save(path: Path, data: dict) -> None:
     temp.replace(path)
 
 
-def set_review(job_dir: Path, status: str, expected_sha256: str | None = None) -> None:
-    """人工審核結果：approved / rejected，寫回 status.json。"""
+def set_review(
+    job_dir: Path, status: str, expected_sha256: str | None = None, basis: str | None = None
+) -> None:
+    """人工審核結果：approved / rejected，寫回 status.json。basis 記錄核准依據（合輯來源核准記 "sources"）。"""
     with _locked(job_dir):
         path = job_dir / "status.json"
         st = json.loads(path.read_text())
+        st.pop("approved_basis", None)  # 重新審核就不沿用上一次的依據
         if status == "approved":
             digest = video_sha256(job_dir)
             if expected_sha256 is not None and digest != expected_sha256:
                 raise ValueError("成片已變更，請重新下載開啟後再人工核准")
             st["approved_sha256"] = digest
+            if basis:
+                st["approved_basis"] = basis
         else:
             st.pop("approved_sha256", None)
         st |= {"status": status, "reviewed_at": datetime.now().astimezone().isoformat(timespec="seconds")}
         _save(path, st)
+
+
+def sources_approved(job_dir: Path) -> bool | None:
+    """合輯（meta 有 sources）的來源是否全部已人工核准；不是合輯回傳 None。
+    來源在 GX10 上已不存在（刪除後）無從確認，視為沒核准——寧可退回手動審核。"""
+    sources = json.loads((job_dir / "meta.json").read_text()).get("sources")
+    if not sources:
+        return None
+
+    def approved(name: str) -> bool:
+        path = job_dir.parent / name / "status.json"
+        return path.exists() and json.loads(path.read_text())["status"] == "approved"
+
+    return all(approved(s) for s in sources)
+
+
+def approve_from_sources(job_dir: Path) -> None:
+    """合輯的來源都已人工核准 → 直接核准這支合輯（仍綁定目前成片 hash）。
+    只放行待審核的：合輯自己 QC 失敗或被人工否決的不覆蓋；已核准的不動。"""
+    status = json.loads((job_dir / "status.json").read_text())["status"]
+    if status == "approved":
+        return
+    if sources_approved(job_dir) is not True:
+        raise ValueError(f"{job_dir.name} 不是合輯，或來源尚未全部人工核准，請人工審核")
+    if status != "pending_review":
+        raise ValueError(f"{job_dir.name} 狀態是 {status}，不能依來源核准，請人工審核")
+    set_review(job_dir, "approved", basis="sources")
 
 
 def upload(job_dir: Path, service=None) -> str:

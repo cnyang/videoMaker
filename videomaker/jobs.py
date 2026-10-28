@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import config, visual_qc
+from . import config, visual_qc, youtube
 
 JOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(-[a-z0-9]+)*$")
 GX10 = os.getenv("VMK_GX10", "gx10")  # ssh 別名
@@ -93,6 +93,7 @@ def inventory() -> list[dict]:
                 "status": st["status"] if st else None,
                 "duration": (st or {}).get("details", {}).get("duration"),
                 "youtube_id": meta.get("youtube_id"),
+                "sources_approved": youtube.sources_approved(d),  # None＝非合輯，True＝來源全核准
                 "size": final.stat().st_size if final.exists() else 0,
                 "photo": bool(meta.get("images")),
                 "visual_qc": visual,

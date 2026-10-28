@@ -23,6 +23,8 @@ REFRESH_SECONDS = 120
 def state_text(r: dict) -> str:
     if r["youtube_id"]:
         return "已上傳"
+    if r["status"] == "pending_review" and r.get("sources_approved"):
+        return "待審核（來源皆已核准）"  # 合輯：可按 u 直接上傳
     if r["status"]:
         return str(jobs.STATE_ZH.get(r["status"], r["status"]))
     if r["active"]:
@@ -297,16 +299,20 @@ class VM(App):
         if r["status"] is None:
             return self.say("這支還沒完成，不能上傳", True)
         digest = self.viewed.get(r["name"])
-        if r["status"] != "approved" and not digest:
+        # 合輯的來源都已人工核准 → 不必再看片，由 GX10 端重驗來源後核准（--from-sources）
+        from_sources = r["status"] == "pending_review" and bool(r.get("sources_approved"))
+        if r["status"] != "approved" and not digest and not from_sources:
             return self.say("請先按 o 開啟最新成片，看片後再核准上傳", True)
 
         def up() -> str:
             if r["status"] != "approved":
-                jobs.remote_cli("approve", r["name"], f"--sha256={digest}")
+                jobs.remote_cli(
+                    "approve", r["name"], "--from-sources" if from_sources else f"--sha256={digest}"
+                )
             return jobs.remote_cli("upload", r["name"])
 
         go = lambda: self.run_task(f"上傳 {r['topic']}（私人）", up)
-        if r["status"] == "approved":
+        if r["status"] == "approved" or from_sources:
             go()
         else:
             self.ask(f"這支{state_text(r)}，尚未核准。要「先核准再上傳（私人）」嗎？", go)

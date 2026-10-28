@@ -671,3 +671,58 @@ def test_tui_requires_opening_video_before_approving_or_approve_and_upload(monke
     env.viewed.clear()
     drive(env, "a", "u")
     assert env.calls == []
+
+
+def test_inventory_reports_whether_every_merge_source_is_approved(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+
+    def mk(name, meta, status):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "plan.json").write_text(json.dumps({"topic": name}))
+        (d / "meta.json").write_text(json.dumps(meta))
+        (d / "status.json").write_text(json.dumps({"status": status}))
+
+    mk("2026-10-05_a", {}, "approved")
+    mk("2026-10-05_b", {}, "pending_review")
+    mk("2026-10-06_weekly-all", {"sources": ["2026-10-05_a"]}, "pending_review")
+    mk("2026-10-06_weekly-mixed", {"sources": ["2026-10-05_a", "2026-10-05_b"]}, "pending_review")
+    by = {j["name"]: j["sources_approved"] for j in jobs.inventory()}
+    assert by == {
+        "2026-10-05_a": None,
+        "2026-10-05_b": None,
+        "2026-10-06_weekly-all": True,
+        "2026-10-06_weekly-mixed": False,
+    }
+
+
+def test_tui_merge_with_all_sources_approved_uploads_without_viewing_or_asking(monkeypatch):
+    ready = _row(GOOD[0]) | {"sources_approved": True}
+    env = Env(monkeypatch, [ready])
+    env.viewed.clear()  # 沒看過片
+    seen = {}
+    drive(env, lambda app: seen.update(state=app.query_one(tui.DataTable).get_row_at(0)[1]), "u")
+    assert seen["state"] == "待審核（來源皆已核准）"
+    assert env.calls == [
+        ("cli", "approve", GOOD[0], "--from-sources"),
+        ("cli", "upload", GOOD[0]),
+    ]  # 順序不能反
+
+
+def test_tui_merge_with_unapproved_sources_or_failed_qc_still_needs_manual_review(monkeypatch):
+    for row in (
+        _row(GOOD[0]) | {"sources_approved": False},  # 有來源還沒核准
+        _row(GOOD[0], "failed") | {"sources_approved": True},  # 合輯自己 QC 沒過
+    ):
+        env = Env(monkeypatch, [row])
+        env.viewed.clear()
+        drive(env, "u")
+        assert env.calls == []  # 沒看片：照舊擋下
+        env.viewed[GOOD[0]] = DIGEST
+        drive(env, "u", "y")
+        assert env.calls[0] == (
+            "cli",
+            "approve",
+            GOOD[0],
+            f"--sha256={DIGEST}",
+        )  # 走人工核准，不用 --from-sources

@@ -2894,3 +2894,76 @@ def test_dialogue_uploads_stay_private_and_need_manual_approval(tmp_path):
         youtube.upload(d, service=svc) == "vid1"
         and svc.calls[0]["body"]["status"]["privacyStatus"] == "private"
     )
+
+
+def _merge_job(tmp_path, source_states, status="pending_review"):
+    """work/ 底下建好各來源（只有 status.json）與一支合輯；回傳合輯資料夾。"""
+    names = []
+    for i, state in enumerate(source_states):
+        src = tmp_path / f"2026-01-01_src{i}"
+        src.mkdir()
+        if state:
+            (src / "status.json").write_text(json.dumps({"status": state}))
+        names.append(src.name)
+    merged = tmp_path / "2026-01-02_weekly-short-long"
+    merged.mkdir()
+    (merged / "meta.json").write_text(json.dumps({"sources": names}))
+    (merged / "status.json").write_text(json.dumps({"status": status}))
+    (merged / "final.mp4").write_bytes(b"x" * 1000)
+    return merged
+
+
+def test_merge_is_approved_from_sources_only_when_every_source_is_approved(tmp_path):
+    from videomaker import youtube
+
+    ready = _merge_job(tmp_path, ["approved", "approved"])
+    assert youtube.sources_approved(ready) is True
+    youtube.approve_from_sources(ready)
+    st = json.loads((ready / "status.json").read_text())
+    assert st["status"] == "approved" and st["approved_basis"] == "sources"
+    assert st["approved_sha256"] == youtube.video_sha256(ready)  # 仍綁定成片，上傳閘門照舊
+    youtube.approve_from_sources(ready)  # 已核准：不動
+
+    # 來源有一支待審核或已不在 GX10 → 不核准
+    for i, states in enumerate((["approved", "pending_review"], ["approved", None])):
+        (tmp_path / f"w{i}").mkdir()
+        part = _merge_job(tmp_path / f"w{i}", states)
+        assert youtube.sources_approved(part) is False
+        with pytest.raises(ValueError, match="請人工審核"):
+            youtube.approve_from_sources(part)
+        assert json.loads((part / "status.json").read_text())["status"] == "pending_review"
+
+
+def test_approve_from_sources_never_overrides_rejected_or_failed_merge_or_plain_jobs(tmp_path):
+    from videomaker import youtube
+
+    for i, status in enumerate(("rejected", "failed")):
+        (tmp_path / f"w{i}").mkdir()
+        d = _merge_job(tmp_path / f"w{i}", ["approved", "approved"], status=status)
+        with pytest.raises(ValueError, match="不能依來源核准"):
+            youtube.approve_from_sources(d)
+        assert json.loads((d / "status.json").read_text())["status"] == status
+    (tmp_path / "plain").mkdir()
+    plain = _yt_job(tmp_path / "plain", status="pending_review")  # 一般作業沒有 sources
+    assert youtube.sources_approved(plain) is None
+    with pytest.raises(ValueError, match="不是合輯"):
+        youtube.approve_from_sources(plain)
+
+
+def test_cli_approve_from_sources_then_upload_goes_through_the_normal_gate(tmp_path):
+    from videomaker import __main__ as cli
+    from videomaker import youtube
+
+    d = _merge_job(tmp_path, ["approved", "pending_review"])
+    with pytest.raises(ValueError, match="請人工審核"):
+        cli.main(["approve", str(d), "--from-sources"])
+    with pytest.raises(ValueError, match="必須先人工核准"):
+        youtube.upload(d, service=_FakeYT([]))
+    (tmp_path / "2026-01-01_src1" / "status.json").write_text(json.dumps({"status": "approved"}))
+    cli.main(["approve", str(d), "--from-sources"])
+    assert json.loads((d / "status.json").read_text())["status"] == "approved"
+    (d / "plan.json").write_text(
+        json.dumps({**_OK_PLAN, "youtube": {"title": "合輯", "description": "d", "tags": ["a"]}})
+    )
+    svc = _FakeYT([{"id": "vidM", "status": {"privacyStatus": "private"}}])
+    assert youtube.upload(d, service=svc) == "vidM"  # 走原本的 approved＋hash 閘門

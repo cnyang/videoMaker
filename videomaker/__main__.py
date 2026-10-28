@@ -71,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
         review.add_argument("job", help="作業資料夾名（work/ 底下）或完整路徑")
         if name == "approve":
             review.add_argument("--sha256", help="審核時觀看的成片 hash；與目前成片不同就拒絕核准")
+            review.add_argument(
+                "--from-sources", action="store_true", help="合輯專用：來源都已人工核准才核准，否則拒絕"
+            )
     sub.add_parser("token-status", help="檢查本機 YouTube token 是否還有效（ok / expired / missing）")
     sub.add_parser(
         "renew-token", help="（在 Mac 跑）檢查 GX10 的 token，過期就跳視窗確認、重新授權並自動複製"
@@ -106,6 +109,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.cmd == "auth":
         youtube.auth()
+    elif a.cmd == "approve" and a.from_sources:
+        youtube.approve_from_sources(youtube.resolve(a.job))
     elif a.cmd in ("approve", "reject"):
         youtube.set_review(
             youtube.resolve(a.job),

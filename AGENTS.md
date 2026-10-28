@@ -12,6 +12,7 @@
    **MiniMax H3 已於 2026-10-22 由使用者放行**，只限對白類（`renderers.py` 的 `h3_fl2va`／`h3_ref2va`）；授權排除美國、歐盟、英國、南韓（`LICENSES.md`），公開到 YouTube 的風險由使用者決定。權重可從 NAS 或 HF `Comfy-Org/MiniMax-H3` 取得，但必須與 HF 的 sha256 相同（`scripts/nas_pull_h3.sh`、`scripts/download.sh` 都會驗）；Turbo LoRA／ControlNet／embedding 未放行。不要讓兒童音樂／小知識改用 H3。`VMK_H3_ENABLED=0` 可一鍵關閉。
 2. **金鑰與 token 不進專案、不進 git、不印到日誌**（`~/.config/videomaker/{client_secret,token}.json`）。hooks 也會擋 `.env`、`secrets.*`，不要繞過。
 3. **上傳一律 `private`，且必須人工核准**（`status.json` 為 `approved`）才能上傳。不要加自動核准、自動公開。token 範圍只有 `youtube.upload`，無法改已上傳影片。
+   **唯一例外（2026-10-28 使用者放行）**：每週精選合輯，若 `meta.sources` 的來源**全部**已人工核准、且合輯自己是 `pending_review`，TUI 按 `u` 可直接上傳（GX10 端 `approve --from-sources` 重驗後核准，`status.json` 記 `approved_basis: sources`，仍綁 `approved_sha256`）。來源缺少／未核准、合輯 QC 失敗或被否決一律回到人工審核；不要擴大到其他情況。
 4. **不要降低 `VMK_MIN_FREE_GB` 硬跑**；記憶體不足就該中止。不要在夜間排程時段（週一到週五 19:30 起）手動跑 GPU 工作。
 5. **不要刪 GX10 上的 `work/`、模型檔、docker 容器**。作業名稱一律過 `jobs.valid()`（只接受 `<日期>_<小寫英數與連字號 slug>`，見 `jobs.JOB_RE`），不可放寬——它擋住路徑穿越與 shell 注入，下載、遠端呼叫與刪除都靠它。
 6. **各階段「輸出已存在就跳過」是可續跑的根基**，改階段邏輯不可破壞（夜間重試與 `--resume` 都依賴它）。
@@ -32,7 +33,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-22）：ruff 乾淨、435 passed（約 58 秒；ComfyUI 連得到時 live 測試不再 skip）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-10-28）：ruff 乾淨、451 passed（約 74 秒；ComfyUI 連得到時 live 測試不再 skip）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```
@@ -145,6 +146,7 @@ work/history.jsonl              → 夜間排程每支的結果（另有 type=me
 - **部分子指令的 stdout 是機器介面**：`jobs-json`（TUI 用 `json.loads`）、`token-status`（`remote_status` 取最後一行 `ok／expired／missing`）、`upload`（印影片 ID）。這些指令不要多印東西；人看的訊息走 `logging`（stderr）。
 - `tui` 是**延遲載入**（`__main__` 內 `from .tui import run`），因為 GX10 沒裝 Textual，夜間 cron 不能因此壞掉。其他頂層 import 也不要引入 GX10 沒有的套件。
 - TUI 在 GX10 上執行子指令（核准、不通過、上傳）一律經 `jobs.remote_cli`，它有**參數白名單**（`approve／reject／upload／upload-approved`、`-` 開頭選項、合法作業名）。新增 TUI 會遠端呼叫的子指令要加進去。
+- **合輯的來源核准判斷**：`youtube.sources_approved` 只看來源 `status.json` 是否 `approved`（來源已被刪除＝視為沒核准，fail-closed）；`jobs.inventory` 的 `sources_approved`（None＝非合輯）讓 TUI 顯示「待審核（來源皆已核准）」。核准動作在 GX10 端的 `youtube.approve_from_sources` 重驗，不信任 Mac 傳來的列表。
 - 合併產生的作業名是 `<日期>_weekly-<片型>`（兒童音樂）、`<日期>_weekly-trivia-<片型>`（小知識）或 `<日期>_weekly-<kind 把底線換連字號>-<片型>`（對白類），同樣符合 `jobs.valid()`（kind 的底線必須換成連字號，`jobs.JOB_RE` 不收底線）；`plan.json` 沿用第一支的 Plan 只換主題與 YouTube 文案，所以走原本的上傳流程。串接用 `-c copy`，靠各支都由同一條 `mux` 產生（編碼參數一致）。
 
 **夜間排程（nightly.py）**
