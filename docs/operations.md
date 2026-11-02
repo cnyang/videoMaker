@@ -63,13 +63,9 @@ videoMaker() {
 
 | 時間 | 動作 |
 |---|---|
-| 週一 19:30 | 夜間排程（**兒童音樂**）自動啟動（提早到辦公室冷氣還開著的時段，避免 GPU 在夜間無空調時長時間滿載）：LLM 想 3 個新主題，依序產生 1 支短片（約 20 秒）+ 1 支長片（約 2:48）+ 1 支 5 分鐘版，狀態停在「待審核」。實測約需 4 小時（約 23:30 到 00:20 結束），07:00 是硬性截止。結束後把當晚的 short 與 long 合併成一支，xl 不合併（見下） |
-| 週二 19:30 | 夜間排程（**小知識**）：LLM 想 2 個英文維基百科條目，依序產生 1 支短片 + 1 支長片（沒有 xl），畫面疊英文字幕、說明欄附維基來源，狀態同樣停在「待審核」。見[小知識影片](#小知識影片)。結束後把當晚的 short 與 long 合併成一支 |
-| 週三 19:30 | 夜間排程（**兒童英文對話**）：LLM 想 2 個學習主題，產生 2 支約 20～40 秒的短片（角色對話、英文字幕）。見[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫)。結束後把這 2 支合併 |
-| 週四 19:30 | 夜間排程（**動物短劇**）：固定主角 Meatball 與 HappySunny（兩隻寫實哈士奇）演 20～45 秒的搞笑日常短劇，每晚產 2 支，結束後把這 2 支合併 |
-| 週五 19:30 | 夜間排程（**有對白的動畫**）：30～60 秒的故事短片（起承轉合、有對白），每晚產 2 支，結束後把這 2 支合併 |
-| 每晚生成結束後 | **合併**（只用 ffmpeg `-c copy`，不用 GPU）：只合併同一種內容、同解析度的成片。**兒童音樂與小知識：把當晚的 short 與 long 依序串成一支（short 在前、long 在後），xl 不加入合併；對白類：把當晚的 2 支 short 串成一支。**來源是近 6 天內（同一週，不用滑動視窗：上週的來源不會再進這週的合輯）、成片還在 GX10、狀態待審核或已核准的作業（你按「不通過」或 QC 失敗的不會被串進去，所以少了其中一支就只剩 1 支）；不到 2 支就略過。合併身分由「內容種類＋片型組合＋來源作業名稱」決定：來源沒變就不重做，多了新來源才產生新的合併（`<日期>_weekly-short-long`、`<日期>_weekly-trivia-short-long`、`<日期>_weekly-<對白類>-short`，同日再合併加 `-2`）。合併失敗只記進 `history.jsonl`，不會讓當晚被標成 failed。合併結果同樣停在「待審核」；若來源都已人工核准，TUI 顯示「待審核（來源皆已核准）」，按 `u` 可直接上傳（不必再看片），否則要另外人工核准 |
-| 早上（週二到週六） | 1. 輸入 `videoMaker` 開 TUI，每支一列，看狀態與兩處（GX10／Mac）是否都有<br>2. 若有「QC 失敗」「未完成」，到 `ssh gx10 'tail -40 ~/code/videoMaker/log/vmk-nightly.log'` 看原因<br>3. 選一列按 `d` 下載到 Mac，按 `o` 開啟看片<br>4. 好的按 `a` 核准，不好的按 `x` 不通過（也可以直接按 `u`：未核准時會問你要不要「先核准再上傳」）<br>5. 按 `U` 一次上傳所有已核准的（全部私人）<br>6. 到 YouTube Studio 逐支確認是「私人」且有「為兒童打造」，再手動改成公開或排程<br>7. 看完、傳完的，按 `g` 刪 GX10 的存檔（Mac 已下載時按 `y` 確認；Mac 沒有、那是唯一一份時要輸入 `DELETE`） |
+| 週一到週六 18:40 | 夜間排程自動啟動（`--kind auto` 依星期選種類），LLM 想主題，依序產生 **2 支 short**（兩支共用同一個 07:00 deadline，狀態停在「待審核」）：一/六 **兒童音樂**＋動物短劇、二/四 **小知識**＋動物短劇、三/五 **兒童英文對話**＋動物短劇。動物短劇（固定主角 Meatball 與 HappySunny，兩隻寫實哈士奇，20～45 秒）觸及率最高，所以每晚都有；各內容見[小知識影片](#小知識影片)與[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫)。平日只生成、不合併。有對白的動畫已退出排程（仍可手動 `--kind dialogue_animation`） |
+| 週日 18:40 | 不生成，**合併本週**（只用 ffmpeg `-c copy`，不用 GPU）：只合併同一種內容、同解析度的成片。**兒童音樂（週一、週六）、小知識（週二、週四）、兒童英文對話（週三、週五）各 2 支串成一支，動物短劇 6 支串成一支。**來源是近 7 天內（從週日 18:40 往前，剛好涵蓋週一到週六，不會串進上週的）、成片還在 GX10、狀態待審核或已核准的作業，最多最新 6 支（你按「不通過」或 QC 失敗的不會被串進去，所以少了其中一支就少一支；不到 2 支就略過）。合併身分由「內容種類＋片型組合＋來源作業名稱」決定：來源沒變就不重做，多了新來源才產生新的合併（`<日期>_weekly-short-long`、`<日期>_weekly-trivia-short-long`、`<日期>_weekly-<對白類>-short`，同日再合併加 `-2`）。合併失敗只記進 `history.jsonl`，不會讓當晚被標成 failed。合併結果同樣停在「待審核」；若來源都已人工核准，TUI 顯示「待審核（來源皆已核准）」，按 `u` 可直接上傳（不必再看片），否則要另外人工核准 |
+| 每天早上 | 1. 輸入 `videoMaker` 開 TUI，每支一列，看狀態與兩處（GX10／Mac）是否都有<br>2. 若有「QC 失敗」「未完成」，到 `ssh gx10 'tail -40 ~/code/videoMaker/log/vmk-nightly.log'` 看原因<br>3. 選一列按 `d` 下載到 Mac，按 `o` 開啟看片<br>4. 好的按 `a` 核准，不好的按 `x` 不通過（也可以直接按 `u`：未核准時會問你要不要「先核准再上傳」）<br>5. 按 `U` 一次上傳所有已核准的（全部私人）<br>6. 到 YouTube Studio 逐支確認是「私人」且有「為兒童打造」，再手動改成公開或排程<br>7. 看完、傳完的，按 `g` 刪 GX10 的存檔（Mac 已下載時按 `y` 確認；Mac 沒有、那是唯一一份時要輸入 `DELETE`） |
 | 09:00 | Mac 的 LaunchAgent 自動檢查 GX10 的 YouTube token；過期會跳視窗，見 [YouTube 上傳與 token](#youtube-上傳與-token) |
 
 重點：
@@ -160,7 +156,7 @@ export VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1
 videoMaker nightly [--kind auto|kids|trivia|kids_english_dialogue|animal_sitcom|dialogue_animation] [--plan short,long,xl] [--deadline 07:00] [--dry-run]
 ```
 
-`--kind auto`：依星期決定今晚做哪一種（週一兒童音樂、週二小知識、週三兒童英文對話、週四動物短劇、週五有對白的動畫，週末不跑）；crontab 就是用它。`--kind kids`（預設，維持舊行為）：LLM 想不重複的繁體主題 → 依序產生 short、long、xl。`--kind trivia`：LLM 想英文維基百科條目 → 依序產生 short、long。對白類每晚 2 支 short（各自的主題）。生成結束後（非 `--dry-run`）會接著合併同一種內容。`--dry-run` 只想主題與預估，不產片、不合併。詳見[夜間排程](#夜間排程)、[小知識影片](#小知識影片)與[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫)。
+`--kind auto`：依星期決定今晚做哪幾種（週一到週六各 2 支 short：一/六兒童音樂、二/四小知識、三/五兒童英文對話，每晚再加動物短劇；週日不生成，只合併本週成片）；crontab 就是用它。`--kind kids`（預設，維持舊行為）：LLM 想不重複的繁體主題 → 依序產生 short、long、xl。`--kind trivia`：LLM 想英文維基百科條目 → 依序產生 short、long。對白類每晚 2 支 short（各自的主題）。手動指定 `--kind` 時，生成結束後（非 `--dry-run`）會接著合併同一種內容。`--dry-run` 只想主題與預估，不產片、不合併。詳見[夜間排程](#夜間排程)、[小知識影片](#小知識影片)與[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫)。
 
 ### `weekly` — 手動合併
 
@@ -168,7 +164,7 @@ videoMaker nightly [--kind auto|kids|trivia|kids_english_dialogue|animal_sitcom|
 videoMaker weekly
 ```
 
-夜間排程結束後會自動合併當晚那一種內容；這個指令是手動版，一次處理所有內容種類：每種內容各串成一支：把近 6 天內（同一週）成片還在 GX10、狀態待審核或已核准的作業串起來（兒童音樂與小知識是 short＋long、xl 不加入；對白類是 short；`-c copy`，最多最新 4 支、同解析度）；不同內容種類不會混在一起。`history.jsonl` 沒有 `kind` 欄位的舊紀錄視為兒童音樂。來源沒變就不重做；詳見[夜間排程](#夜間排程)。
+每週日排程會自動合併本週的四種內容；這個指令是手動版，一次處理所有內容種類：每種內容各串成一支：把近 7 天內成片還在 GX10、狀態待審核或已核准的作業串起來（兒童音樂與小知識是 short＋long、xl 不加入；對白類是 short；`-c copy`，最多最新 6 支、同解析度）；不同內容種類不會混在一起。`history.jsonl` 沒有 `kind` 欄位的舊紀錄視為兒童音樂。來源沒變就不重做；詳見[夜間排程](#夜間排程)。
 
 ### `characters` — 固定角色庫
 
@@ -339,7 +335,7 @@ videoMaker make "肉丸和Sunny跳舞" --images photos/meatball photos/sunny
 
 ## 小知識影片
 
-給兒童看的小知識短片（週二夜間產生）。**每則知識都必須有來源**，做法是「先抓來源、再寫內容」，不信任 LLM 自己記得的事實或網址：
+給兒童看的小知識短片（週二、週四夜間產生）。**每則知識都必須有來源**，做法是「先抓來源、再寫內容」，不信任 LLM 自己記得的事實或網址：
 
 ```
 LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消歧義頁、太短的直接略過）
@@ -369,7 +365,7 @@ LLM 想英文維基百科條目名稱 → wiki.fetch 抓條目（不存在、消
 
 兒童音樂（`kids`）與小知識（`trivia`）的流程完全不變，仍用 Wan，不使用 H3。
 
-**⚠ H3 授權限制。** MiniMax H3 於 2026-10-22 由你放行，但授權排除美國、歐盟、英國、南韓（`LICENSES.md`）——影片公開到 YouTube 後這些地區也看得到，是否公開由你判斷（程式一律先私人上傳）。H3 預設啟用；`VMK_H3_ENABLED=0` 可一鍵關閉。**權重還沒下載完（ComfyUI 下拉清單看不到）時**，週三到週五的夜間排程只會記一筆 `skipped`（`reason: renderer … 的模型尚未安裝：…`），不想主題、不碰 GPU。`videomaker check` 會列出缺的 H3 模型。啟用步驟見[啟用 H3 的前置條件](#啟用-h3-的前置條件)。
+**⚠ H3 授權限制。** MiniMax H3 於 2026-10-22 由你放行，但授權排除美國、歐盟、英國、南韓（`LICENSES.md`）——影片公開到 YouTube 後這些地區也看得到，是否公開由你判斷（程式一律先私人上傳）。H3 預設啟用；`VMK_H3_ENABLED=0` 可一鍵關閉。**權重還沒下載完（ComfyUI 下拉清單看不到）時**，兒童英文對話、動物短劇的夜間排程只會記一筆 `skipped`（`reason: renderer … 的模型尚未安裝：…`），不想主題、不碰 GPU。`videomaker check` 會列出缺的 H3 模型。啟用步驟見[啟用 H3 的前置條件](#啟用-h3-的前置條件)。
 
 ### 結構化腳本
 
@@ -426,7 +422,7 @@ LLM 輸出 JSON，`content.py` 用 pydantic 驗證，失敗把錯誤丟回給 LL
 videoMaker make "點餐時說想吃什麼" --kind kids_english_dialogue --dry-run
 videoMaker make "狗狗下班前一分鐘" --kind animal_sitcom --dry-run
 videoMaker make "找不到的氣球" --kind dialogue_animation --dry-run
-# 夜間排程 dry-run（週三／四／五各自的 --kind；權重沒裝好或 H3 關閉時只會看到 skipped）
+# 夜間排程 dry-run（對白類各自的 --kind；權重沒裝好或 H3 關閉時只會看到 skipped）
 videoMaker nightly --kind kids_english_dialogue --dry-run
 videoMaker nightly --kind auto --dry-run            # 依今天星期
 # 只跑單一集（H3 權重已裝好；非夜間時段）
@@ -458,29 +454,29 @@ videoMaker make "<主題>" --kind animal_sitcom --stage clips
 GX10 的 crontab（**新排程已於 2026-10-22 安裝**；舊的 `1,3`／`2,4`／週五 `weekly` 三行備份在 GX10 的 `~/crontab.backup-20261022`；實際以 `ssh gx10 crontab -l` 為準）：
 
 ```
-# videoMaker 夜間排程：週一兒童音樂、週二小知識、週三兒童英文對話、週四動物短劇、週五有對白的動畫；19:30 開跑、07:00 前結束，生成完接著合併同一種內容
-30 19 * * 1-5 cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly --kind auto >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
+# videoMaker 夜間排程：週一到週六每晚 2 支 short（一/六兒童音樂、二/四小知識、三/五兒童英文對話，每晚加動物短劇）；週日只合併本週；每天 18:40 開跑、07:00 前結束
+40 18 * * * cd /home/ehomeservice/code/videoMaker && flock -n /tmp/vmk-nightly.lock env VMK_COMFY_URL=http://127.0.0.1:8188 VMK_LLM_URL=http://127.0.0.1:11434/v1 .venv/bin/python -m videomaker nightly --kind auto >> /home/ehomeservice/code/videoMaker/log/vmk-nightly.log 2>&1
 ```
 
-H3 預設啟用，不用在 `env` 加東西；要暫時關掉 H3 就在 `env` 後面加上 `VMK_H3_ENABLED=0`。舊排程（回滾用）：
+H3 預設啟用，不用在 `env` 加東西；要暫時關掉 H3 就在 `env` 後面加上 `VMK_H3_ENABLED=0`。前一版排程（回滾用，2026-10-22 起到本次改版）：
 
 ```
-30 19 * * 1,3 … nightly --kind kids …
-30 19 * * 2,4 … nightly --kind trivia …
-30 19 * * 5   … weekly …
+30 19 * * 1-5 … nightly --kind auto …    # 週一兒童音樂、二小知識、三兒童英文對話、四動物短劇、五有對白的動畫，生成後當晚合併
 ```
+
+回滾要連同程式一起退回（`SCHEDULE`／`tonight` 已改成每晚多種內容；舊版 crontab 配新版程式會變成每天 18:40 跑）。
 
 行為：
 
-- **週一到週五**每晚 19:30 啟動，`--kind auto` 依星期選今晚的內容種類（`nightly.SCHEDULE`），週末不跑；`--deadline 07:00` 前必須結束。兒童音樂預設 short、long、xl 各 1 支；小知識只有 short、long；對白類每晚 2 支 short（`nightly.DIALOGUE_PER_NIGHT`）。都由短到長依序執行；時間不夠時被略過的是最耗時的那支。
+- **每天 18:40** 啟動，`--kind auto` 依星期選今晚的內容種類（`nightly.SCHEDULE`）：週一到週六依序各產 1 支 short（當天的主內容＋動物短劇），週日不生成、只合併；`--deadline 07:00` 前必須結束，兩種內容共用同一個截止時間（先跑的拖到過 07:00，後面那支會被記成 `skipped`，不會被推到隔天）。手動 `--kind kids` 仍是 short、long、xl 各 1 支、`--kind trivia` 是 short、long、對白類是 2 支 short（`nightly.PLANS`）。時間不夠時被略過的是最耗時的那支。
 - 主題由 LLM 想：繁體中文短語，不得與 `history.jsonl` 和現有作業的主題重複，避開牙齒、嘴巴、飲食、水、洗澡、細軟物體這類容易畫壞的題材（僅兒童音樂；對白類的角色會說話，不套用）。
 - 每支開跑前預估耗時，「現在 + 預估」超過 deadline 就略過（記成 `skipped`），避免拖到白天占用 GPU。
 - 每支（含重試）開跑前先用 `nvidia-smi` 量 GPU 溫度，高於 `VMK_COOL_TEMP`（預設 45°C）就每 30 秒再量一次，降下來才開跑；等到「再不開跑就趕不上 deadline」仍沒降下來，該支記成 `skipped`。讀不到溫度（沒有 nvidia-smi）時不等。
 - 單支失敗：等 10 分鐘用 `--resume` 重試一次；仍失敗記成 `failed`，繼續下一支，不會整晚中斷。
-- **生成結束後合併同一種內容**（`nightly.merge_after`）：不用 GPU、用 ffmpeg `-c copy`；失敗只記錄，不影響當晚結果。合併規則見上方「每天的流程」。來源視窗：所有種類都只看近 6 天（同一週，不用滑動視窗）。兒童音樂與小知識合併當晚的 short 與 long（xl 不加入）；對白類每晚產 2 支 short，合併這一對。**合併發生在你審核當晚新片之前**：合輯裡可能包含還沒看過的新片，之後你若把其中一支按不通過，合輯不會自動更新——合輯本身要另外人工核准，看片時請連同來源一起確認。
+- **週日合併本週**（`nightly.tonight` 對 `nightly.WEEKLY_MERGE` 的四種內容各呼叫一次 `merge_after`）：不用 GPU、用 ffmpeg `-c copy`；失敗只記錄，不影響已產生的成片。合併規則見上方「每天的流程」。來源視窗近 7 天、最多最新 6 支（`weekly.WINDOW_DAYS`／`MAX_SOURCES`）。排程只產 short，所以兒童音樂與小知識的合輯只有 short（`merge_group` 仍是 short＋long，手動產的 long 會一起併；xl 不加入）。**合併發生在週日傍晚、你不一定看完本週所有片之前**：之後若把其中一支按不通過，合輯不會自動更新——合輯本身要另外人工核准（來源全數已核准時 TUI 按 `u` 可直接上傳），看片時請連同來源一起確認。手動指定 `--kind` 時維持舊行為：生成結束後立刻合併同一種內容。
 - 每支的主題、片型、內容種類（`kind`／`content_type`）、`renderer`、開始／結束／耗時、`retry_count`、狀態、輸出路徑、QC 結果、GPU 生成秒數、使用的模型、錯誤都記在 `work/history.jsonl`；H3 另記 `h3_mode`、`shot_count`、`seconds_generated`、`generation_seconds`、`gen_sec_per_video_sec`（之後估算耗時用）。合併結果也記一筆（`type: "merge"`，含 `merge_id`、來源、`status` = merged／skipped／failed 與原因）；它們帶 `topic`／`format`／`kind`，舊的讀取程式不會壞，且 `weekly.sources` 會跳過它們。舊紀錄的欄位完全不變。
 - **不會自動上傳 YouTube**（要你核准），也不再存 NAS。
-- `flock` 保證同一時間只有一個夜間任務；手動執行 `make` 不受它保護，**19:30 之後不要同時手動跑 GPU 工作**（會搶記憶體，夜間任務會因 `剩餘記憶體 … < 40GB` 失敗）。
+- `flock` 保證同一時間只有一個夜間任務；手動執行 `make` 不受它保護，**週一到週六 18:40 之後不要同時手動跑 GPU 工作**（會搶記憶體，夜間任務會因 `剩餘記憶體 … < 40GB` 失敗）。
 
 檢查 history：`ssh gx10 'tail -20 ~/code/videoMaker/work/history.jsonl | python3 -m json.tool --no-ensure-ascii'`；只看合併：`grep '"type": "merge"' work/history.jsonl`；看 H3 每秒成本：`grep gen_sec_per_video_sec work/history.jsonl`。
 

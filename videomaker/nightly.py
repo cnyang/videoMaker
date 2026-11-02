@@ -1,7 +1,8 @@
-"""夜間排程：LLM 想主題 → 依序產生成片，結束後合併同一種內容。由 cron 週一到週五 19:30 啟動（`--kind auto` 依星期決定今晚做哪一種），
+"""夜間排程：LLM 想主題 → 依序產生成片。由 cron 每天 18:40 啟動（`--kind auto` 依星期決定今晚做哪幾種），
 deadline（預設 07:00）前必須結束。
 
-週一兒童音樂、週二小知識、週三兒童英文對話、週四動物短劇、週五有對白的動畫；每晚生成完再跑該種內容的合併（ffmpeg，不用 GPU）。
+週一到週六每晚 2 支 short：一/六兒童音樂、二/四小知識、三/五兒童英文對話，每晚再加 1 支動物短劇；
+週日不生成，只把本週的成片依內容種類合併（ffmpeg，不用 GPU）。
 所有成片都停在 pending_review，由人工審核；這裡不碰 YouTube。
 """
 
@@ -23,8 +24,17 @@ NIGHT = ["short", "long", "xl"]
 NIGHT_TRIVIA = KINDS["trivia"]  # 小知識夜：支援的片型就是全部（short、long），由 plan.KINDS 統一管理
 DIALOGUE_PER_NIGHT = 2  # 對白類每晚產 2 支（各自的主題），生成完把這 2 支合併
 PLANS = {"kids": NIGHT, "trivia": NIGHT_TRIVIA, **{k: KINDS[k] * DIALOGUE_PER_NIGHT for k in DIALOGUE_KINDS}}
-# 星期（Monday = 0）→ 今晚的內容種類；週末不跑。cron 只要每個工作天 19:30 呼叫 `nightly --kind auto`
-SCHEDULE = {0: "kids", 1: "trivia", 2: "kids_english_dialogue", 3: "animal_sitcom", 4: "dialogue_animation"}
+# 星期（Monday = 0）→ 今晚依序要產的內容種類（各 1 支 short）；沒列出的週日不生成，只做每週合併。
+# cron 每天 18:40 呼叫 `nightly --kind auto`。動物短劇觸及率最高，所以每晚都有；dialogue_animation 已退出排程（仍可手動 --kind）
+SCHEDULE = {
+    0: ["kids", "animal_sitcom"],
+    1: ["trivia", "animal_sitcom"],
+    2: ["kids_english_dialogue", "animal_sitcom"],
+    3: ["trivia", "animal_sitcom"],
+    4: ["kids_english_dialogue", "animal_sitcom"],
+    5: ["kids", "animal_sitcom"],
+}
+WEEKLY_MERGE = ("kids", "trivia", "kids_english_dialogue", "animal_sitcom")  # 週日合併的內容種類
 SEC_PER_STEP = 17.3  # Wan 5B 單鏡實測：20 步 ≈ 346 秒
 # 每個獨特鏡頭的關鍵幀秒數：兒童音樂 FLUX.3 + upsampler 實測 14 鏡 466 秒 ≈ 33 秒/張（含載入）；小知識 schnell 約 12 秒
 KEYFRAME_SEC = {"kids": 35, "trivia": 12}
@@ -215,7 +225,11 @@ def _append_history(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="kids") -> list[dict]:
+def nightly(
+    plan=None, deadline: str | datetime = "07:00", dry_run=False, sleep=time.sleep, kind="kids"
+) -> list[dict]:
+    """deadline 可傳 datetime：同一晚連跑多種內容時由 tonight 算一次共用，
+    否則第二種開跑時若已過 07:00，deadline_after 會把截止時間推到隔天。"""
     plan = plan or PLANS[kind]
     if bad := [f for f in plan if f not in KINDS[kind]]:  # 確定會失敗的別拿去重試、浪費 10 分鐘與主題
         raise ValueError(f"{kind} 不支援片型 {bad}（可用 {KINDS[kind]}）")
@@ -237,7 +251,7 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="
             for r in results:
                 _append_history(r)
         return results
-    dl = deadline_after(datetime.now().astimezone(), deadline)
+    dl = deadline if isinstance(deadline, datetime) else deadline_after(datetime.now().astimezone(), deadline)
     topics = _suggest(kind, len(plan), _past_topics())
     log.info("今晚主題：%s；deadline %s", topics, dl.strftime("%m-%d %H:%M"))
     results = []
@@ -265,9 +279,9 @@ def nightly(plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, kind="
     return results
 
 
-def kind_for(now: datetime) -> str | None:
-    """星期 → 今晚的內容種類；週末是 None（不跑）。"""
-    return SCHEDULE.get(now.weekday())
+def kinds_for(now: datetime) -> list[str]:
+    """星期 → 今晚依序要產的內容種類；週日是空的（只合併）。"""
+    return SCHEDULE.get(now.weekday(), [])
 
 
 def merge_after(kind: str) -> list[dict]:
@@ -287,15 +301,21 @@ def merge_after(kind: str) -> list[dict]:
 def tonight(
     kind: str = "auto", plan=None, deadline="07:00", dry_run=False, sleep=time.sleep, now=None
 ) -> list[dict]:
-    """排程入口：決定今晚的內容種類（auto = 依星期）、生成、再合併。回傳生成結果加合併結果。"""
+    """排程入口。auto = 依星期：週一到週六依序生成當天的內容種類（各 1 支 short，不合併），週日只合併本週。
+    手動指定 kind 維持舊行為：生成該種內容後接著合併。回傳生成結果加合併結果。"""
     now = now or datetime.now().astimezone()
-    if kind == "auto":
-        kind = kind_for(now)
-        if kind is None:
-            log.info("週末沒有排程")
-            return []
-    results = nightly(plan, deadline, dry_run, sleep, kind)
-    return results if dry_run else results + merge_after(kind)
+    if kind != "auto":
+        results = nightly(plan, deadline, dry_run, sleep, kind)
+        return results if dry_run else results + merge_after(kind)
+    kinds = kinds_for(now)
+    if not kinds:  # 週日：本週的成片都已產完，一次把每種內容合併成一支
+        log.info("週日不生成，合併本週成片")
+        return [] if dry_run else [r for k in WEEKLY_MERGE for r in merge_after(k)]
+    dl = deadline_after(now, deadline)  # 兩種內容共用同一個截止時間
+    results: list[dict] = []
+    for k in kinds:
+        results += nightly(plan or ["short"], dl, dry_run, sleep, k)
+    return results
 
 
 def _stats(job) -> dict:

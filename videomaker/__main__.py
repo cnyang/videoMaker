@@ -50,8 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--kind",
         choices=["auto", "kids", "trivia", *DIALOGUE_KINDS],
         default="kids",
-        help="今晚產哪一種；auto = 依星期（週一兒童音樂、二小知識、三兒童英文對話、四動物短劇、五有對白的動畫，週末不跑）。"
-        "生成結束後會接著合併同一種內容（不用 GPU，失敗不影響成片）",
+        help="今晚產哪一種；auto = 依星期（週一到週六各產 2 支 short：一/六兒童音樂、二/四小知識、三/五兒童英文對話，"
+        "每晚再加動物短劇；週日不生成，只合併本週成片）。手動指定種類時，生成結束後會接著合併同一種內容（不用 GPU，失敗不影響成片）",
     )
     nt.add_argument(
         "--plan",

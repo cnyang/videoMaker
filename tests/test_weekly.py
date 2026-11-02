@@ -440,9 +440,12 @@ def test_merge_ignores_history_merge_records_and_old_or_excess_sources(work):
         _kind_job(work, f"2026-09-{10 + i}_{chr(97 + i)}", "kids", 40 - i) for i in range(2)
     ]  # 40 天前：視窗外
     assert weekly.sources("short", FRI) == [] and dirs
-    recent = [_kind_job(work, f"2026-10-{10 + i}_{chr(97 + i)}", "kids", 6 - i) for i in range(6)]
+    assert (weekly.WINDOW_DAYS, weekly.MAX_SOURCES) == (7, 6)  # 週一到週六每天各 1 支動物短劇，週日一次全合
+    recent = [_kind_job(work, f"2026-10-{9 + i}_{chr(97 + i)}", "kids", 7 - i) for i in range(7)]
     got = weekly.sources("short", FRI)
-    assert got == recent[-weekly.MAX_SOURCES :]  # 最多取最新的 MAX_SOURCES 支
+    assert (
+        len(recent) > weekly.MAX_SOURCES and got == recent[-weekly.MAX_SOURCES :]
+    )  # 最多取最新的 MAX_SOURCES 支
     with (work / "history.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"type": "merge", "date": FRI.isoformat(), "topic": "", "format": "short", "kind": "kids", "job": "2026-10-16_weekly-short", "status": "merged"}) + "\n")  # fmt: skip
     assert weekly.sources("short", FRI) == got  # 合併紀錄不會被當成來源

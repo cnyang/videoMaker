@@ -4,7 +4,7 @@
 操作手冊（產片、審核、cron、YouTube token、排錯）在 [`docs/operations.md`](docs/operations.md)，模型授權在 [`LICENSES.md`](LICENSES.md)。
 
 **一句話**：主題 → LLM 企劃 → ACE-Step 音樂 + 拍點 → FLUX 關鍵幀 → Wan 圖生影片 → ffmpeg 合成 → QC → 人工核准 → 私人上傳 YouTube。
-每週排程：週一兒童音樂、週二小知識、週三兒童英文對話、週四動物短劇、週五有對白的動畫（後三者用 MiniMax H3 renderer 產生帶對白音訊的影片，2026-10-22 使用者放行，見硬規則 1）；對白類每晚產 2 支，生成後把這 2 支合併；其他種類每晚生成後接著合併同一種內容。
+每週排程（2026-11-02 改版，每天 18:40 開跑）：週一到週六每晚 2 支 short——一/六兒童音樂、二/四小知識、三/五兒童英文對話，每晚再加動物短劇（觸及率最高）；週日不生成，把本週成片依種類合併（兒童音樂 2 支、小知識 2 支、兒童英文對話 2 支、動物短劇 6 支各合成一支）。兒童英文對話與動物短劇用 MiniMax H3 renderer 產生帶對白音訊的影片（2026-10-22 使用者放行，見硬規則 1）；有對白的動畫已退出排程，仍可手動 `--kind`。
 
 ## 硬規則（違反前必須先問使用者）
 
@@ -14,7 +14,7 @@
 3. **上傳一律 `private`，且必須人工核准**（`status.json` 為 `approved`）才能上傳。不要加自動核准、自動公開。token 範圍只有 `youtube.upload`，無法改已上傳影片。
    **Facebook Reels（2026-11-02 使用者選定）**：只限粉絲專頁，人工核准後用 `upload-facebook` 上傳 `DRAFT` 草稿，不公開、不排程發布；沿用核准 hash 與 `.upload.lock`，狀態另記 `meta.facebook_reel`，憑證只存專案外 `facebook.json`。不得將 YouTube 的來源核准例外擴大到 FB。
    **唯一例外（2026-10-28 使用者放行）**：每週精選合輯，若 `meta.sources` 的來源**全部**已人工核准、且合輯自己是 `pending_review`，TUI 按 `u` 可直接上傳（GX10 端 `approve --from-sources` 重驗後核准，`status.json` 記 `approved_basis: sources`，仍綁 `approved_sha256`）。來源缺少／未核准、合輯 QC 失敗或被否決一律回到人工審核；不要擴大到其他情況。
-4. **不要降低 `VMK_MIN_FREE_GB` 硬跑**；記憶體不足就該中止。不要在夜間排程時段（週一到週五 19:30 起）手動跑 GPU 工作。
+4. **不要降低 `VMK_MIN_FREE_GB` 硬跑**；記憶體不足就該中止。不要在夜間排程時段（週一到週六 18:40 起）手動跑 GPU 工作。
 5. **不要刪 GX10 上的 `work/`、模型檔、docker 容器**。作業名稱一律過 `jobs.valid()`（只接受 `<日期>_<小寫英數與連字號 slug>`，見 `jobs.JOB_RE`），不可放寬——它擋住路徑穿越與 shell 注入，下載、遠端呼叫與刪除都靠它。
 6. **各階段「輸出已存在就跳過」是可續跑的根基**，改階段邏輯不可破壞（夜間重試與 `--resume` 都依賴它）。
 7. **不要為了驗證去跑真實管線**：一支短片約 35 分鐘、長片 1.5 小時、xl 3 小時，且占用共用 GPU。驗證用 pytest 與 `--dry-run`。
@@ -34,7 +34,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-11-02）：ruff 乾淨、497 passed（約 75 秒；ComfyUI 連得到時 live 測試不再 skip）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-11-02）：ruff 乾淨、499 passed（約 75 秒；ComfyUI 連得到時 live 測試不再 skip）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```

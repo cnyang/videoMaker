@@ -69,9 +69,9 @@ _（核准綁 sha256／`.upload.lock`、stdout 機器介面、`tui` 延遲載入
 **夜間排程（nightly.py）**
 - 預估耗時 = 獨特鏡頭數 × `SEC_PER_STEP`(17.3) × `STEPS` + 其他階段，×1.15；「現在 + 預估」超過 deadline 就略過該支，不硬跑。每支（含重試）開跑前 `wait_cool`。
 - `flock` 只保護夜間任務；手動 `make` 不受保護，會搶統一記憶體。
-- `nightly.tonight(kind="auto")` 是 cron 入口：依星期決定種類 → `nightly()` 生成 → `merge_after`（`weekly.merge_kind`，不用 GPU，例外只記進 history，**不得讓整晚變 failed**）。`nightly()` 本身不合併、回傳值只含生成結果（既有測試依賴這點）。H3 沒啟用時 `nightly()` 直接記 `skipped`，不想主題。
-- **合併身分** `merge_id` = sha256(kind｜fmt｜排序後的來源作業名)；去重看兩處：work/ 裡已有同身分（含舊版只有 `meta.sources` 的合併）、history 記過 `status: merged`（合輯上傳後 GX10 存檔被刪也不重做）。`failed` 的合併可重試。所有種類都只合併同一週的成片（`weekly.WINDOW_DAYS` = 6，**不用滑動視窗**，上週的來源不會再進這週的合輯）。`merge_id` 的片型欄是組合字串（兒童音樂與小知識 `short+long`），作業名用連字號（`weekly-short-long`、`weekly-trivia-short-long`）；`weekly.merge` 仍可傳單一片型字串。
-- **合併的範圍**（`weekly.py`）：窗口 `WINDOW_DAYS` = 6 天；來源最多取最新的 `MAX_SOURCES` = 4 支；`merge_group(kind)` 決定哪些片型併成一支，排除 `NO_MERGE_FORMATS`（兒童音樂的 `xl` 約 5 分鐘，不併）——兒童音樂與小知識是當晚 short＋long 串成一支，對白類是當晚 2 支 short。
+- `nightly.tonight(kind="auto")` 是 cron 入口：週一到週六依 `SCHEDULE` 依序對當天的每種內容呼叫 `nightly(plan=["short"], dl, …)`，**不合併**；週日（`kinds_for` 回空）對 `WEEKLY_MERGE` 逐一 `merge_after`（`weekly.merge_kind`，不用 GPU，例外只記進 history，**不得讓整晚變 failed**）。deadline 在 `tonight` 算一次、以 datetime 傳給各次 `nightly()`——`deadline_after` 遇到已過 07:00 會推到隔天，第二種內容才不會因此拖到白天。手動指定 `--kind`（非 auto）維持舊行為：`nightly()` 生成 → `merge_after`。`nightly()` 本身不合併、回傳值只含生成結果（既有測試依賴這點）。H3 沒啟用時 `nightly()` 直接記 `skipped`，不想主題。H3 沒啟用時 `nightly()` 直接記 `skipped`，不想主題。
+- **合併身分** `merge_id` = sha256(kind｜fmt｜排序後的來源作業名)；去重看兩處：work/ 裡已有同身分（含舊版只有 `meta.sources` 的合併）、history 記過 `status: merged`（合輯上傳後 GX10 存檔被刪也不重做）。`failed` 的合併可重試。所有種類都只合併本週（週一到週六）的成片（`weekly.WINDOW_DAYS` = 7：週日 18:40 往前 7 天，6 天會差幾秒漏掉週一第一支；上週六最晚也早於上週日 18:40，所以不會串進上週的來源）。`merge_id` 的片型欄是組合字串（兒童音樂與小知識 `short+long`），作業名用連字號（`weekly-short-long`、`weekly-trivia-short-long`）；`weekly.merge` 仍可傳單一片型字串。
+- **合併的範圍**（`weekly.py`）：窗口 `WINDOW_DAYS` = 7 天；來源最多取最新的 `MAX_SOURCES` = 6 支（動物短劇週一到週六各 1 支）；`merge_group(kind)` 決定哪些片型併成一支，排除 `NO_MERGE_FORMATS`（兒童音樂的 `xl` 約 5 分鐘，不併）——兒童音樂與小知識是 short＋long 串成一支（排程只產 short，所以實際只有 short），對白類是 short；週日一次把本週的來源合成一支。
 - history 新增的欄位全是加法；merge 紀錄必須帶 `topic`／`format`／`kind`（`_past_topics`、`weekly.sources` 直接取值），並以 `type: "merge"` 區分，`weekly.sources` 會跳過它。
 
 ## 修改指南
@@ -91,7 +91,7 @@ _（核准綁 sha256／`.upload.lock`、stdout 機器介面、`tui` 延遲載入
 - 視覺 QC 是 clef-flash 每秒 2 張的初篩，門檻 20%（原 50%，實測 38% 的融合畫面會被放行）。2026-10-16 用 80 張人工標記（3 張有問題）初步驗證：20% 在 4 支作業上只標出 1 支（唯一明顯壞掉的），再降到 10% 會標出全部作業（4.2% 的畫面）卻只多抓 1 張；偵測器對細微缺陷幾乎無感（AUC 0.74、n 太小），所以門檻維持 20%（標記流程見 operations.md 的「校準門檻」），短暫異常、閃爍與動作不連續仍可能漏判；人工看片不可省略。舊作業不會自動補查或重設人工核准；模型失敗的 QC 可用 `--resume` 續跑。
 - **對白類尚未端到端實跑**：H3 已放行，權重 2026-10-22 起在 GX10 背景下載；`workflows/h3_*.json` 只通過 `/object_info` 結構檢查，沒有 GPU 驗證。第一次實跑要在非夜間時段手動做（實測記憶體峰值與每鏡耗時、校準 `VMK_H3_EXTRA_GB`／`VMK_H3_SEC_PER_SEC`），步驟見 operations.md#啟用-h3-的前置條件。腳本企劃（LLM＋驗證）已用真實 LLM 對三種內容做過 `--dry-run`。
 - 兒童英文對話沿用 `selfDeclaredMadeForKids: True`；動物短劇與有對白的動畫明確送 `selfDeclaredMadeForKids: False`（不是兒童內容；2026-10-27 起，之前是省略，會套用頻道預設「為兒童打造」，當天已上傳的兩支哈士奇要在 Studio 手動改）。YouTube 分類目前一律是 Music（10），對白類公開前也要在 Studio 改。
-- GX10 的 crontab 已於 2026-10-22 換成 `nightly --kind auto` 單行（舊的 `1,3`／`2,4`／週五 `weekly` 三行備份在 GX10 的 `~/crontab.backup-20261022`，回滾見 operations.md#夜間排程）。H3 權重下載完成前，週三到週五只會記 `skipped`。
+- GX10 的 crontab 已於 2026-10-22 換成 `nightly --kind auto` 單行（舊的 `1,3`／`2,4`／週五 `weekly` 三行備份在 GX10 的 `~/crontab.backup-20261022`，回滾見 operations.md#夜間排程）。H3 權重下載完成前，對白類（兒童英文對話、動物短劇）只會記 `skipped`。2026-11-02 起改成每天 18:40 的 `40 18 * * *`（週一到週六每晚 2 支 short、週日合併），細節見 operations.md#夜間排程。
 - Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
 - 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。
 - `LICENSES.md` 的企劃 LLM（`gpt-oss-20b-128k` 自訂 tag）授權尚未核對底層模型。

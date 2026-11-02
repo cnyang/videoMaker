@@ -1,6 +1,6 @@
 """合併：把近期夜間產生的同內容、同片型、同解析度的成片串成一支（純 ffmpeg `-c copy`，不用 GPU）。
 
-每晚生成結束後由 `nightly.merge_after` 呼叫（也可手動 `videomaker weekly`）。合併身分（merge_id）由
+每週日排程由 `nightly.merge_after` 呼叫（手動指定 `--kind` 的夜間任務結束後、或 `videomaker weekly` 也會呼叫）。合併身分（merge_id）由
 內容種類＋片型＋來源作業名稱決定：來源沒變就不重做，加入新來源才產生新的合併。
 合併後的作業和一般作業一樣停在 pending_review，由人工審核；不碰 YouTube。
 """
@@ -19,10 +19,11 @@ from .plan import KINDS, Plan, Youtube
 
 log = logging.getLogger("videomaker")
 MERGEABLE = ("pending_review", "approved")  # 人工標記不通過、QC 失敗的不合併
-# 每週合併一次、只合併同一週的成片：不用滑動視窗，上週的來源不會再被串進這週的合輯（6 天 < 7 天，涵蓋當晚到本週）
-WINDOW_DAYS = 6
+# 每週日 18:40 合併一次本週（週一到週六）的成片。視窗要 7 天：週一第一支的時間戳記晚於週一 18:40，6 天會差幾秒而漏掉它；
+# 上週六最晚也是上週六夜間，早於上週日 18:40，所以 7 天不會把上週的來源串進這週的合輯
+WINDOW_DAYS = 7
 NO_MERGE_FORMATS = ("xl",)  # 兒童音樂的 xl（約 5 分鐘）不加入合併
-MAX_SOURCES = 4
+MAX_SOURCES = 6  # 動物短劇週一到週六每天 1 支，週日 6 支合成一支
 # 對白類合輯的 YouTube 文案：(中文名, 英文名, 中文說明, 英文說明, hashtags)
 COMPILATION = {
     "kids_english_dialogue": ("兒童英文對話精選", "Kids English Dialogues", "適合小朋友跟著說的簡單英文對話", "Simple English conversations kids can say along with.", "#KidsEnglish #LearnEnglish #Compilation"),

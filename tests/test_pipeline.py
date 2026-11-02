@@ -2669,52 +2669,99 @@ def _hours_from_now(hours):
     return (datetime.now().astimezone() + timedelta(hours=hours)).strftime("%H:%M")
 
 
-def test_schedule_routes_each_weekday_to_its_content_kind():
+def test_schedule_routes_each_weekday_to_its_content_kinds():
     from datetime import datetime, timedelta
 
     from videomaker import nightly
 
     monday = datetime(2026, 10, 19).astimezone()
     assert monday.weekday() == 0
-    assert [nightly.kind_for(monday + timedelta(days=i)) for i in range(7)] == [
-        "kids",
-        "trivia",
-        "kids_english_dialogue",
-        "animal_sitcom",
-        "dialogue_animation",
-        None,  # 週末不跑
-        None,
+    animal = "animal_sitcom"
+    assert [nightly.kinds_for(monday + timedelta(days=i)) for i in range(7)] == [
+        ["kids", animal],
+        ["trivia", animal],
+        ["kids_english_dialogue", animal],
+        ["trivia", animal],
+        ["kids_english_dialogue", animal],
+        ["kids", animal],
+        [],  # 週日不生成，只做每週合併
     ]
-    assert set(nightly.SCHEDULE.values()) == set(nightly.PLANS)  # 每種內容都有排到一天
+    scheduled = {k for kinds in nightly.SCHEDULE.values() for k in kinds}
+    assert scheduled == set(nightly.PLANS) - {
+        "dialogue_animation"
+    }  # 有對白的動畫已退出排程（仍可手動 --kind）
+    assert set(nightly.WEEKLY_MERGE) == scheduled  # 週日合併的就是排程裡的每種內容
 
 
-def test_tonight_auto_picks_the_kind_runs_the_night_then_merges_it(tmp_path, monkeypatch):
+def _fake_night(monkeypatch, calls):
+    """把生成與合併換成記錄呼叫的假函式；回傳合併會產生的 history 紀錄。"""
+    from videomaker import nightly
+
+    monkeypatch.setattr(
+        nightly,
+        "nightly",
+        lambda plan, dl, dry, sleep, kind: calls.append(("night", kind, plan, dl)) or [{"status": "ok"}],
+    )
+    merged = [{"type": "merge", "topic": "", "format": "short", "kind": "x", "status": "merged"}]
+    monkeypatch.setattr(nightly.weekly, "merge_kind", lambda kind: calls.append(("merge", kind)) or merged)
+    return merged
+
+
+def test_tonight_auto_weekday_runs_both_kinds_as_one_short_each_without_merging(tmp_path, monkeypatch):
     from datetime import datetime
 
     from videomaker import nightly
 
     monkeypatch.setattr(config, "WORK", tmp_path)
     calls = []
-    monkeypatch.setattr(
-        nightly,
-        "nightly",
-        lambda plan, dl, dry, sleep, kind: calls.append(("night", kind)) or [{"status": "ok"}],
-    )
-    merged = [{"type": "merge", "topic": "", "format": "short", "kind": "x", "status": "merged"}]
-    monkeypatch.setattr(nightly.weekly, "merge_kind", lambda kind: calls.append(("merge", kind)) or merged)
-    wednesday = datetime(2026, 10, 21, 19, 30).astimezone()
+    _fake_night(monkeypatch, calls)
+    wednesday = datetime(2026, 10, 21, 18, 40).astimezone()
     res = nightly.tonight("auto", now=wednesday)
-    assert calls == [("night", "kids_english_dialogue"), ("merge", "kids_english_dialogue")]  # 先生成、後合併
-    assert [r.get("type", "night") for r in res] == ["night", "merge"]
+    assert [c[:3] for c in calls] == [
+        ("night", "kids_english_dialogue", ["short"]),
+        ("night", "animal_sitcom", ["short"]),
+    ]  # 各 1 支 short、平日不合併（合併留給週日）
+    # 兩種內容共用同一個 deadline；第二種開跑時就算已過 07:00，也不能被推到隔天
+    expected = datetime(2026, 10, 22, 7, 0).astimezone()
+    assert calls[0][3] == calls[1][3] == expected
+    assert [r["status"] for r in res] == ["ok", "ok"] and not (tmp_path / "history.jsonl").exists()
+    calls.clear()
+    nightly.tonight("auto", now=datetime(2026, 10, 24, 18, 40).astimezone())  # 週六：兒童音樂＋動物短劇
+    assert [c[1] for c in calls] == ["kids", "animal_sitcom"]
+
+
+def test_tonight_auto_sunday_only_merges_the_week_and_records_it(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    calls = []
+    merged = _fake_night(monkeypatch, calls)
+    sunday = datetime(2026, 10, 25, 18, 40).astimezone()
+    assert sunday.weekday() == 6
+    res = nightly.tonight("auto", now=sunday)
+    assert calls == [("merge", k) for k in nightly.WEEKLY_MERGE]  # 不生成、依序合併四種內容
+    assert res == merged * len(nightly.WEEKLY_MERGE)
     hist = [json.loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
-    assert hist == merged  # 合併結果寫進 history
+    assert hist == res  # 合併結果寫進 history
     calls.clear()
-    nightly.tonight("auto", now=datetime(2026, 10, 22, 19, 30).astimezone())  # 週四動物短劇也合併
-    assert calls == [("night", "animal_sitcom"), ("merge", "animal_sitcom")]
+    assert nightly.tonight("auto", now=sunday, dry_run=True) == [] and calls == []  # dry-run 不合併
+
+
+def test_tonight_with_explicit_kind_keeps_the_old_night_then_merge_behaviour(tmp_path, monkeypatch):
+    from videomaker import nightly
+
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    calls = []
+    _fake_night(monkeypatch, calls)
+    res = nightly.tonight("trivia")
+    assert [c[:2] for c in calls] == [
+        ("night", "trivia"),
+        ("merge", "trivia"),
+    ]  # 手動指定 --kind：先生成、後合併
+    assert [r.get("type", "night") for r in res] == ["night", "merge"]
     calls.clear()
-    assert (
-        nightly.tonight("auto", now=datetime(2026, 10, 24, 19, 30).astimezone()) == [] and calls == []
-    )  # 週六
     assert nightly.tonight("kids", dry_run=True) and ("merge", "kids") not in calls  # dry-run 不合併
 
 
