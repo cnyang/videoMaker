@@ -451,7 +451,7 @@ videoMaker make "<主題>" --kind animal_sitcom --stage clips
 
 ## 夜間排程
 
-GX10 的 crontab（**新排程已於 2026-10-22 安裝**；舊的 `1,3`／`2,4`／週五 `weekly` 三行備份在 GX10 的 `~/crontab.backup-20261022`；實際以 `ssh gx10 crontab -l` 為準）：
+GX10 的 crontab（**每天 18:40 的新排程已於 2026-11-02 安裝**；改版前的整份 crontab 備份在 GX10 的 `~/crontab.backup-20261102`，2026-10-22 的舊三行備份在 `~/crontab.backup-20261022`；實際以 `ssh gx10 crontab -l` 為準）：
 
 ```
 # videoMaker 夜間排程：週一到週六每晚 2 支 short（一/六兒童音樂、二/四小知識、三/五兒童英文對話，每晚加動物短劇）；週日只合併本週；每天 18:40 開跑、07:00 前結束
@@ -464,7 +464,7 @@ H3 預設啟用，不用在 `env` 加東西；要暫時關掉 H3 就在 `env` �
 30 19 * * 1-5 … nightly --kind auto …    # 週一兒童音樂、二小知識、三兒童英文對話、四動物短劇、五有對白的動畫，生成後當晚合併
 ```
 
-回滾要連同程式一起退回（`SCHEDULE`／`tonight` 已改成每晚多種內容；舊版 crontab 配新版程式會變成每天 18:40 跑）。
+回滾要連同程式一起退回（`git revert` 2026-11-02 的排程改版 commit）：`SCHEDULE`／`tonight` 已改成每晚多種內容、週日只合併，舊版 crontab 配新版程式會變成週一到週五 19:30 依新排程跑、週六日不跑。還原 crontab 用 `ssh gx10 'crontab ~/crontab.backup-20261102'`。
 
 行為：
 
@@ -480,7 +480,7 @@ H3 預設啟用，不用在 `env` 加東西；要暫時關掉 H3 就在 `env` �
 
 檢查 history：`ssh gx10 'tail -20 ~/code/videoMaker/work/history.jsonl | python3 -m json.tool --no-ensure-ascii'`；只看合併：`grep '"type": "merge"' work/history.jsonl`；看 H3 每秒成本：`grep gen_sec_per_video_sec work/history.jsonl`。
 
-停用：`crontab -e` 刪掉那一行，或用上面的舊排程三行還原（舊單行備份在 `~/crontab.backup-20261016`，舊三行備份在 `~/crontab.backup-20261022`）。
+停用：`crontab -e` 刪掉那一行，或用備份還原（2026-11-02 改版前的整份在 `~/crontab.backup-20261102`，舊三行在 `~/crontab.backup-20261022`，舊單行在 `~/crontab.backup-20261016`）。
 
 ---
 
