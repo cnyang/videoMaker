@@ -95,5 +95,4 @@ _（核准綁 sha256／`.upload.lock`、stdout 機器介面、`tui` 延遲載入
 - Wan 在照片模式會憑空畫出「人手拿藍色棒狀玩具」，目前只有提示詞抑制，細節與實測見 operations.md#片型與照片模式。
 - 過期 token 的「跳視窗 → 授權 → 自動複製」整條流程沒有端到端實跑過（各環節分開驗證過）。
 - `LICENSES.md` 的企劃 LLM（`gpt-oss-20b-128k` 自訂 tag）授權尚未核對底層模型。
-- `models.txt` 檔頭註解仍提到 `comfy-get-model.sh`，實際下載用 `scripts/download.sh`。
 - `kids-shorts-pipeline-spec.md` 是 Phase 1 的歷史規格：路線 A（14B／RIFE／Lightning）、NAS 存放、`--route` 旗標都已不存在；現況以本檔與 operations.md 為準，其中 §2 硬性限制、§7、§11 的規則仍有效。
