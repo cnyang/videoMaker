@@ -246,11 +246,11 @@ videoMaker upload-facebook <資料夾名>
 
 - CLI 的 stdout 只有影片 ID；進度與錯誤不含 token。標題與說明沿用 `plan.json.youtube`；這個專案產出的影片一律送 `is_ai_generated=true`。
 - 目前依 [Meta 官方範例](https://github.com/fbsamples/reels_publishing_apis/tree/main/fb_reels_publishing_api_sample) 與 [官方 API collection](https://www.postman.com/meta/facebook/documentation/r56bjfd/facebook-api) **保守接受 4–60 秒、9:16、至少 540×960、至少 23fps**，以實際成片的 ffprobe 結果判斷；長片或超長合輯會拒絕，不自動裁切、不重新生成。Meta 網站能接受的長度可能與 API 不同，此版未放寬限制。
-- 沿用 `status.json.approved_sha256` 與 `.upload.lock`。比對 hash、ffprobe 與傳送影片使用同一個已開啟檔案，防止上傳途中路徑被換成其他版本。鎖只護住讀寫 `meta.json` 與送出請求；等 Meta 處理（最久約 2.5 分鐘）時不持鎖，結果寫回前會重讀 `meta.json`，所以這段時間可以核准、不通過或上傳 YouTube，也不會互相覆寫。
+- 沿用 `status.json.approved_sha256` 與 `.upload.lock`。比對 hash、ffprobe 與傳送影片使用同一個已開啟檔案，防止上傳途中路徑被換成其他版本。鎖只護住讀寫 `meta.json` 與送出請求；等 Meta 處理（最久約 5 分鐘）時不持鎖，結果寫回前會重讀 `meta.json`，所以這段時間可以核准、不通過或上傳 YouTube，也不會互相覆寫。
 - **FB 不接受「合輯來源全核准」的例外**：`status.json` 的 `approved_basis` 是 `sources` 時 `upload-facebook` 一律拒絕，要在 TUI 按 `o` 看片、再按 `a` 人工核准（重新核准會清掉 `approved_basis`）。
 - `meta.json.facebook_reel` 分開記錄 `page_id`、`video_id`、`sha256`、`upload_url`、`phase`。`phase` 依序為 `starting → created → uploaded → finishing → processing → draft`；只有 finish 的 `DRAFT` 請求成功、Meta 回報 `video_status=ready`，**且 `publishing_phase.publish_status` 明確是 `draft` 或 `not_started`** 才標為草稿（欄位缺漏或其他值都不算，寧可停在 `processing`）。這代表 API 已完成處理，仍需到 Meta 確認草稿與發布狀態；TUI 不追蹤你之後在 Meta 的手動發布。
 - 終態：處理失敗記 `failed`（TUI 顯示「失敗」）、Meta 回報已發布／已排程記 `published`（TUI 顯示「已發布」）。這兩種重跑會直接拒絕、不連線，要先到 Meta 處理，再依下一條的步驟移除 `facebook_reel`。已是 `draft` 的重跑只比對成片 hash 就回傳影片 ID，不需要憑證或企劃。
-- 傳送或處理中斷，重跑 **同一作業** 會沿用 ID、依伺服器回報位置續傳或只查狀態（停在 `finishing` 時會先問 Meta 收到 finish 沒有，收到就不重送）；處理超過約 2.5 分鐘就保留進度並提示重試，不會冒充完成。遠端影片處理失敗、被刪除或 session 過期時，要先到 Meta 處理，不自動另建一支。
+- 傳送或處理中斷，重跑 **同一作業** 會沿用 ID、依伺服器回報位置續傳或只查狀態（停在 `finishing` 時會先問 Meta 收到 finish 沒有，收到就不重送）；處理超過約 5 分鐘（`facebook.POLL_ATTEMPTS`×`POLL_SECONDS`）就保留進度並提示重試，不會冒充完成。遠端影片處理失敗、被刪除或 session 過期時，要先到 Meta 處理，不自動另建一支。
 - 建立 session 時若 Meta 明確拒絕（HTTP 4xx，例如 token 過期、專頁 ID 或權限錯誤）或連線階段就逾時，程式會自動撤回 `starting` 標記，修好後直接重跑即可。只有結果不明（送出後逾時、5xx、DNS 失敗等）才會停在 `starting` 並拒絕再建立，避免發生不明的重複草稿。這時請先到 Meta 查明有無物件；確認沒有要保留的草稿後，備份 `meta.json`，在沒有上傳執行中的情況下移除該檔的 `facebook_reel` 欄位，再重跑（`failed`／`published` 也用這個步驟）。Meta 回傳的上傳網址無效時，`video_id` 已先記進 `meta.json`（`created`），可據此到 Meta 查詢。切換專頁或成片 hash 變更也會拒絕沿用既有 Reel，需先人工確認。
 - API 固定使用 `v25.0`，可用 `VMK_FB_API_VERSION` 指定 App 支援的版本。此版沒有 FB 批次上傳、自動發布或排程發布。
 

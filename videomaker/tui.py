@@ -199,6 +199,10 @@ class VM(App):
             result = fn()
         except Exception as e:  # noqa: BLE001 任何失敗都要顯示給使用者，並照常重新整理
             self.call_from_thread(self.say, f"✗ {label}失敗：{e}", True)
+            # 通知 10 秒就消失，長訊息（如 FB 逾時）來不及看：另外用視窗留著，按 Esc 才關
+            self.call_from_thread(
+                self.push_screen, Detail(f"[b]✗ {escape(label)}失敗[/b]\n\n{escape(str(e))}")
+            )
         else:
             self.call_from_thread(self.say, f"✓ {label}完成" + (f"：{result}" if result else ""))
         self.call_from_thread(self.action_refresh)

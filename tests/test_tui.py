@@ -781,3 +781,18 @@ def test_tui_facebook_checks_duration_locally_and_shows_terminal_phases(monkeypa
         seen = {}
         drive(env, lambda app, seen=seen: seen.update(row=app.query_one(tui.DataTable).get_row_at(0)))
         assert label in seen["row"]
+
+
+def test_tui_failed_task_keeps_full_error_in_a_dialog_until_dismissed(monkeypatch):
+    env = Env(monkeypatch, [_row(GOOD[0])])
+    monkeypatch.setattr(jobs, "remote_cli", lambda *a: (_ for _ in ()).throw(RuntimeError("仍在處理")))
+    seen = {}
+    drive(
+        env,
+        "a",
+        lambda app: seen.update(text=getattr(app.screen, "text", "")),
+        "escape",
+        lambda app: seen.update(after=type(app.screen).__name__),
+    )
+    assert "仍在處理" in seen["text"] and "失敗" in seen["text"]  # 訊息不會 10 秒後消失
+    assert seen["after"] != "Detail"  # Esc 關得掉

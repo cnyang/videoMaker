@@ -27,7 +27,7 @@ from .plan import Plan
 log = logging.getLogger("videomaker")
 
 MIN_SECONDS, MAX_SECONDS = 4, 60  # 官方範例的 Reels 長度；TUI 也靠它在本機先擋掉長片
-POLL_ATTEMPTS, POLL_SECONDS = 30, 5  # 最多約 2.5 分鐘
+POLL_ATTEMPTS, POLL_SECONDS = 60, 5  # 最多約 5 分鐘（實測處理曾超過 150 秒）
 # 只有 Meta 明確回報這兩種才算草稿；其餘（含欄位缺漏）一律不當成完成，寧可停在 processing
 _DRAFT_STATES = {"draft", "not_started"}
 # 終態：不自動重試也不重建，要人到 Meta 確認後手動清掉 facebook_reel 欄位
@@ -174,7 +174,7 @@ def _finish_received(status: dict) -> bool:
 
 def upload(job_dir: Path, session: requests.Session | None = None) -> str:
     """上傳或續跑同一支 Reel；只有確認處理完成後才記為草稿。
-    鎖只護住「讀寫 meta 與送出請求」；輪詢處理進度（最久約 2.5 分鐘）不持鎖，不擋審核與 YouTube 上傳。"""
+    鎖只護住「讀寫 meta 與送出請求」；輪詢處理進度（最久約 5 分鐘）不持鎖，不擋審核與 YouTube 上傳。"""
     with requests.Session() if session is None else nullcontext(session) as client:
         with youtube.locked(job_dir):
             pending = _submit(job_dir, client)

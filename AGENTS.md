@@ -34,7 +34,7 @@
 
 ```bash
 uv sync                                                                    # 安裝（Python 3.12）
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-11-02）：ruff 乾淨、495 passed（約 76 秒；ComfyUI 連得到時 live 測試不再 skip）
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q   # 基準（2026-11-02）：ruff 乾淨、497 passed（約 75 秒；ComfyUI 連得到時 live 測試不再 skip）
 uv run python -m videomaker --help
 uv run python -m videomaker make "主題" --dry-run                           # 只產 plan.json
 ```

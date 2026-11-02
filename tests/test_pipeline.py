@@ -3052,7 +3052,7 @@ def test_facebook_timeout_resumes_polling_without_creating_or_uploading_again(fb
     from videomaker import facebook
 
     pending = {"status": {"video_status": "processing"}}
-    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[pending] * 30])
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[pending] * facebook.POLL_ATTEMPTS])
     with pytest.raises(TimeoutError, match="仍在處理"):
         facebook.upload(fb_job, client)
     assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == "processing"
@@ -3253,7 +3253,9 @@ def test_facebook_rejects_approval_based_on_sources(fb_job):
 def test_facebook_requires_positive_draft_confirmation(fb_job, status):
     from videomaker import facebook
 
-    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[{"status": status}] * 30])
+    client = _FakeFB(
+        [_FB_START, {"success": True}, {"success": True}, *[{"status": status}] * facebook.POLL_ATTEMPTS]
+    )
     with pytest.raises(TimeoutError, match="確認"):
         facebook.upload(fb_job, client)
     assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == "processing"
@@ -3379,3 +3381,11 @@ def test_facebook_auth_failure_keeps_previous_credentials(tmp_path, monkeypatch)
     path = tmp_path / "cred" / "facebook.json"
     assert json.loads(path.read_text())["page_id"] == "123"  # 舊憑證不被截斷
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_facebook_waits_beyond_two_and_a_half_minutes_for_slow_processing(fb_job):
+    from videomaker import facebook
+
+    slow = {"status": {"video_status": "processing"}}  # 實測：處理時間曾超過原本 150 秒的窗口
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[slow] * 45, _FB_READY])
+    assert facebook.upload(fb_job, client) == "456"
