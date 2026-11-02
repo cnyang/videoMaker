@@ -99,6 +99,7 @@ videoMaker() {
 | `x` | 不通過 | |
 | `u` | 上傳這一支（私人） | 已核准直接上傳；合輯的來源都已核准（狀態顯示「待審核（來源皆已核准）」）也直接上傳，GX10 端會重驗來源並記 `approved_basis: sources`；未核准會問你要不要「先核准再上傳」；已上傳過的不會重複上傳 |
 | `U` | 上傳全部已核准 | 先確認支數，全部私人上傳 |
+| `f` | 上傳 FB Reels 草稿 | 必須先按 `o` 看片、按 `a` 核准；上傳到設定的粉絲專頁，不發布。FB 欄顯示「待完成」或「草稿」，可與 YouTube 分別上傳 |
 | `g` | 刪除 GX10 存檔 | 刪掉 `work/<作業>/` 整個資料夾；有勾選時改為批次刪除所有勾選的 |
 | `m` | 刪除 Mac 下載檔 | 刪掉 `~/Downloads/videoMaker/<作業>/` 整個資料夾（含成片、縮圖與 JSON）；有勾選時改為批次刪除所有勾選的 |
 | `T` | token | 檢查 GX10 的 YouTube token，過期就跳視窗、重新授權並自動複製 |
@@ -215,6 +216,43 @@ videoMaker upload-approved          # 上傳所有「已核准、尚未上傳」
 - 冪等：已上傳過的不會重複上傳（`meta.json` 會記 `youtube_id`、`youtube_uploaded_at`、`youtube_privacy`）。
 - `upload-approved` 一支失敗不會擋其他支；失敗的下次重跑即可。
 - 上傳的影片網址：`https://studio.youtube.com/video/<影片 ID>/edit`。
+
+### `facebook-auth` / `upload-facebook` — Facebook Reels（粉絲專頁草稿）
+
+這個入口只建立 **DRAFT 草稿**，不會公開或排程發布。先人工核准成片，完成後再到 Meta Business Suite 檢查與手動發布；YouTube 的 `upload`／`upload-approved` 仍只處理 YouTube。
+
+**首次設定（在 GX10 操作，不要將 token 貼在聊天或命令列）**
+
+1. 在 [Meta 開發者後台](https://developers.facebook.com/apps/) 建立 App，設定 Facebook Login／粉絲專頁存取。依 [Pages API getting started](https://developers.facebook.com/docs/pages-api/getting-started/) 取得目標專頁的 **Page access token**；不是 User token 或 App token。授權帳號需有該專頁建立內容的權限，常用權限為 `pages_show_list`、`pages_read_engagement`、`pages_manage_posts`。是否需要 App Review／Advanced Access 取決於 App 模式與管理對象，請以 Meta 後台顯示為準。
+2. SSH 登入 GX10，在專案目錄執行下列互動設定。輸入 Page ID，再貼上 token（不回顯）。程式只將憑證存在專案外的 `~/.config/videomaker/facebook.json`，權限 `600`；不要自行放進 `work/`、repo 或 `.env`。
+
+```bash
+cd ~/code/videoMaker
+.venv/bin/python -m videomaker facebook-auth
+```
+
+Token 過期或權限被撤回時，用相同指令更新；此版沒有 OAuth 網頁登入與自動換發 token，也不讀取或修改 YouTube 憑證。若在 Mac 設定，只能供 Mac CLI 上傳使用；TUI 的上傳在 GX10 執行，必須在 GX10 設定。
+
+**日常上傳**
+
+```text
+TUI: o (觀看最新版) -> a (人工核准) -> f (FB 草稿) -> Meta (檢查與手動發布)
+```
+
+```bash
+videoMaker approve <資料夾名>
+videoMaker upload-facebook <資料夾名>
+```
+
+- CLI 的 stdout 只有影片 ID；進度與錯誤不含 token。標題與說明沿用 `plan.json.youtube`；這個專案產出的影片一律送 `is_ai_generated=true`。
+- 目前依 [Meta 官方範例](https://github.com/fbsamples/reels_publishing_apis/tree/main/fb_reels_publishing_api_sample) 與 [官方 API collection](https://www.postman.com/meta/facebook/documentation/r56bjfd/facebook-api) **保守接受 4–60 秒、9:16、至少 540×960、至少 23fps**，以實際成片的 ffprobe 結果判斷；長片或超長合輯會拒絕，不自動裁切、不重新生成。Meta 網站能接受的長度可能與 API 不同，此版未放寬限制。
+- 沿用 `status.json.approved_sha256` 與 `.upload.lock`。比對 hash、ffprobe 與傳送影片使用同一個已開啟檔案，防止上傳途中路徑被換成其他版本。鎖只護住讀寫 `meta.json` 與送出請求；等 Meta 處理（最久約 2.5 分鐘）時不持鎖，結果寫回前會重讀 `meta.json`，所以這段時間可以核准、不通過或上傳 YouTube，也不會互相覆寫。
+- **FB 不接受「合輯來源全核准」的例外**：`status.json` 的 `approved_basis` 是 `sources` 時 `upload-facebook` 一律拒絕，要在 TUI 按 `o` 看片、再按 `a` 人工核准（重新核准會清掉 `approved_basis`）。
+- `meta.json.facebook_reel` 分開記錄 `page_id`、`video_id`、`sha256`、`upload_url`、`phase`。`phase` 依序為 `starting → created → uploaded → finishing → processing → draft`；只有 finish 的 `DRAFT` 請求成功、Meta 回報 `video_status=ready`，**且 `publishing_phase.publish_status` 明確是 `draft` 或 `not_started`** 才標為草稿（欄位缺漏或其他值都不算，寧可停在 `processing`）。這代表 API 已完成處理，仍需到 Meta 確認草稿與發布狀態；TUI 不追蹤你之後在 Meta 的手動發布。
+- 終態：處理失敗記 `failed`（TUI 顯示「失敗」）、Meta 回報已發布／已排程記 `published`（TUI 顯示「已發布」）。這兩種重跑會直接拒絕、不連線，要先到 Meta 處理，再依下一條的步驟移除 `facebook_reel`。已是 `draft` 的重跑只比對成片 hash 就回傳影片 ID，不需要憑證或企劃。
+- 傳送或處理中斷，重跑 **同一作業** 會沿用 ID、依伺服器回報位置續傳或只查狀態（停在 `finishing` 時會先問 Meta 收到 finish 沒有，收到就不重送）；處理超過約 2.5 分鐘就保留進度並提示重試，不會冒充完成。遠端影片處理失敗、被刪除或 session 過期時，要先到 Meta 處理，不自動另建一支。
+- 建立 session 時若 Meta 明確拒絕（HTTP 4xx，例如 token 過期、專頁 ID 或權限錯誤）或連線階段就逾時，程式會自動撤回 `starting` 標記，修好後直接重跑即可。只有結果不明（送出後逾時、5xx、DNS 失敗等）才會停在 `starting` 並拒絕再建立，避免發生不明的重複草稿。這時請先到 Meta 查明有無物件；確認沒有要保留的草稿後，備份 `meta.json`，在沒有上傳執行中的情況下移除該檔的 `facebook_reel` 欄位，再重跑（`failed`／`published` 也用這個步驟）。Meta 回傳的上傳網址無效時，`video_id` 已先記進 `meta.json`（`created`），可據此到 Meta 查詢。切換專頁或成片 hash 變更也會拒絕沿用既有 Reel，需先人工確認。
+- API 固定使用 `v25.0`，可用 `VMK_FB_API_VERSION` 指定 App 支援的版本。此版沒有 FB 批次上傳、自動發布或排程發布。
 
 ### `auth` / `token-status` / `renew-token` — YouTube 授權
 
@@ -511,6 +549,8 @@ launchctl bootout gui/$(id -u)/com.videomaker.tokencheck && rm ~/Library/LaunchA
 | `VMK_H3_SEC_PER_SEC` | `90` | 沒有 history 時，H3 每產出 1 秒成片的保守生成秒數（有資料後改用最近 10 支的中位數） |
 | `VMK_RENDERER_<KIND>` | 空值（用預設） | 覆寫某對白類內容的 renderer，如 `VMK_RENDERER_ANIMAL_SITCOM=h3_fl2va` |
 | `VMK_YT_DIR` | `~/.config/videomaker` | `client_secret.json` 與 `token.json` 的資料夾 |
+| `VMK_FB_DIR` | `~/.config/videomaker` | FB 的 `facebook.json` 憑證目錄，必須在專案外；TUI 使用 GX10 上的設定 |
+| `VMK_FB_API_VERSION` | `v25.0` | Facebook Graph API 版本 |
 | `VMK_GX10` | `gx10` | `renew-token` 與 TUI 連 GX10 用的 ssh 別名 |
 | `VMK_LOCAL_DIR` | `~/Downloads/videoMaker` | TUI 下載到 Mac 的位置 |
 

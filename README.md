@@ -2,6 +2,8 @@
 
 輸入一個主題，自動產出直式 9:16、純音樂、無旁白的兒童音樂短片（短片約 20 秒、長片約 2 分 48 秒、xl 約 5 分鐘），存在 GX10，經人工核准後以「私人」上傳到 YouTube，最後由你在 YouTube Studio 手動公開。
 
+也支援人工核准後上傳 **Facebook 粉絲專頁 Reels 草稿**（TUI 按 `f`，或 CLI `upload-facebook`），再到 Meta 手動發布；首次設定與短片限制見[操作手冊](docs/operations.md#facebook-auth--upload-facebook--facebook-reels粉絲專頁草稿)。
+
 ```
 主題
  └─ [plan] LLM 企劃 plan.json（雙語 YouTube 標題／說明／標籤）
@@ -63,4 +65,4 @@ photo/             照片模式用的本機照片（不進 git）
 
 - **只用 [`LICENSES.md`](LICENSES.md) 白名單內的模型**；要用別的先查授權並問過使用者。
 - **金鑰（`client_secret.json`、`token.json`）絕不進專案或 git。**
-- **上傳一律私人、且必須人工核准**；QC 用 clef-flash 抽查兒童內容與畫面變形，TUI 顯示結果；抽樣仍可能漏判，必須人工看片。
+- **必須人工核准才能上傳；YouTube 一律私人、Facebook 一律草稿**；QC 用 clef-flash 抽查兒童內容與畫面變形，TUI 顯示結果；抽樣仍可能漏判，必須人工看片。

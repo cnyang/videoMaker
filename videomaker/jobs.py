@@ -93,6 +93,7 @@ def inventory() -> list[dict]:
                 "status": st["status"] if st else None,
                 "duration": (st or {}).get("details", {}).get("duration"),
                 "youtube_id": meta.get("youtube_id"),
+                "facebook_reel": meta.get("facebook_reel"),
                 "sources_approved": youtube.sources_approved(d),  # None＝非合輯，True＝來源全核准
                 "size": final.stat().st_size if final.exists() else 0,
                 "photo": bool(meta.get("images")),
@@ -169,9 +170,13 @@ def download(job: str) -> Path:
 
 
 def remote_cli(*args: str) -> str:
-    """在 GX10 上執行 videomaker 子指令（approve／reject／upload／upload-approved），回傳輸出。"""
+    """在 GX10 上執行白名單內的審核／上傳子指令，回傳輸出。"""
     for a in args:
-        if not (a.startswith("-") or a in {"approve", "reject", "upload", "upload-approved"} or valid(a)):
+        if not (
+            a.startswith("-")
+            or a in {"approve", "reject", "upload", "upload-approved", "upload-facebook"}
+            or valid(a)
+        ):
             raise ValueError(f"不允許的參數：{a!r}")
     r = _gx(f"cd {GX10_PROJECT} && .venv/bin/python -m videomaker {' '.join(args)}", timeout=900)
     if r.returncode:

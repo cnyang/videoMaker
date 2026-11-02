@@ -4,6 +4,7 @@ import subprocess
 
 import numpy as np
 import pytest
+import requests
 import soundfile as sf
 
 from videomaker import audio, config, pipeline, visual_qc
@@ -2967,3 +2968,414 @@ def test_cli_approve_from_sources_then_upload_goes_through_the_normal_gate(tmp_p
     )
     svc = _FakeYT([{"id": "vidM", "status": {"privacyStatus": "private"}}])
     assert youtube.upload(d, service=svc) == "vidM"  # 走原本的 approved＋hash 閘門
+
+
+class _FakeFB:
+    def __init__(self, outcomes):
+        self.outcomes, self.calls = list(outcomes), []
+
+    def request(self, method, url, **kwargs):
+        if hasattr(kwargs.get("data"), "read"):
+            kwargs["data"] = kwargs["data"].read()
+        self.calls.append((method, url, kwargs))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        status, body = outcome if isinstance(outcome, tuple) else (200, outcome)
+
+        class Response:
+            status_code = status
+
+            def json(self):
+                return body
+
+        return Response()
+
+
+@pytest.fixture
+def fb_job(tmp_path, monkeypatch):
+    from videomaker import facebook
+
+    cred = tmp_path / "credentials"
+    cred.mkdir()
+    (cred / "facebook.json").write_text(json.dumps({"page_id": "123", "page_access_token": "test-token"}))
+    monkeypatch.setattr(config, "FB_DIR", cred)
+    monkeypatch.setattr(config, "FB_API_VERSION", "v25.0")
+    monkeypatch.setattr(facebook, "_check_video", lambda stream: None)
+    monkeypatch.setattr(facebook.time, "sleep", lambda seconds: None)
+    return _yt_job(tmp_path)
+
+
+_FB_START = {"video_id": "456", "upload_url": "https://rupload.facebook.com/video-upload/v25.0/456"}
+_FB_READY = {"status": {"video_status": "ready", "publishing_phase": {"publish_status": "draft"}}}
+
+
+def test_facebook_upload_is_draft_only_hash_bound_and_independent_from_youtube(fb_job):
+    from videomaker import facebook
+
+    meta_path = fb_job / "meta.json"
+    meta_path.write_text(json.dumps({"youtube_id": "already-on-youtube", "models": {"music": ["ACE-Step"]}}))
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, _FB_READY])
+    assert facebook.upload(fb_job, client) == "456"
+    assert client.calls[1][2]["data"] == (fb_job / "final.mp4").read_bytes()
+    finish = client.calls[2][2]["data"]
+    assert finish["video_state"] == "DRAFT" and finish["is_ai_generated"] == "true"
+    assert finish["title"].startswith("小熊刷牙") and len(finish["title"]) <= 100
+    assert all(c[2]["allow_redirects"] is False and "access_token" not in c[1] for c in client.calls)
+    saved = json.loads(meta_path.read_text())
+    assert saved["facebook_reel"]["phase"] == "draft" and saved["youtube_id"] == "already-on-youtube"
+    assert saved["models"]["music"] == ["ACE-Step"] and "test-token" not in meta_path.read_text()
+    assert facebook.upload(fb_job, _FakeFB([])) == "456"  # 成功重跑不再連線
+
+
+@pytest.mark.parametrize("change", ["pending_review", "rejected", "failed", "missing_hash", "changed_file"])
+def test_facebook_rejects_unapproved_or_changed_video_before_network(fb_job, change):
+    from videomaker import facebook
+
+    path = fb_job / "status.json"
+    review = json.loads(path.read_text())
+    if change == "missing_hash":
+        review.pop("approved_sha256")
+    elif change == "changed_file":
+        (fb_job / "final.mp4").write_bytes(b"changed")
+    else:
+        review["status"] = change
+    path.write_text(json.dumps(review))
+    client = _FakeFB([])
+    with pytest.raises(ValueError, match="核准"):
+        facebook.upload(fb_job, client)
+    assert client.calls == []
+
+
+def test_facebook_timeout_resumes_polling_without_creating_or_uploading_again(fb_job):
+    from videomaker import facebook
+
+    pending = {"status": {"video_status": "processing"}}
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[pending] * 30])
+    with pytest.raises(TimeoutError, match="仍在處理"):
+        facebook.upload(fb_job, client)
+    assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == "processing"
+    resumed = _FakeFB([_FB_READY])
+    assert facebook.upload(fb_job, resumed) == "456"
+    assert [call[0] for call in resumed.calls] == ["GET"]
+
+
+def test_facebook_transfer_failure_resumes_same_id_at_server_offset(fb_job):
+    from videomaker import facebook
+
+    client = _FakeFB([_FB_START, requests.Timeout("test-token must not leak")])
+    with pytest.raises(RuntimeError, match="連線失敗") as error:
+        facebook.upload(fb_job, client)
+    assert "test-token" not in str(error.value) and error.value.__suppress_context__
+    resumed = _FakeFB(
+        [
+            {"status": {"uploading_phase": {"status": "in_progress", "bytes_transfered": 200}}},
+            {"success": True},
+            {"success": True},
+            _FB_READY,
+        ]
+    )
+    assert facebook.upload(fb_job, resumed) == "456"
+    assert resumed.calls[1][2]["headers"]["offset"] == "200"
+    assert resumed.calls[1][2]["data"] == (fb_job / "final.mp4").read_bytes()[200:]
+    assert not any(
+        c[2].get("data", {}).get("upload_phase") == "start"
+        for c in resumed.calls
+        if isinstance(c[2].get("data"), dict)
+    )
+
+
+def test_facebook_unknown_start_result_blocks_duplicate_sessions(fb_job):
+    from videomaker import facebook
+
+    with pytest.raises(RuntimeError):
+        facebook.upload(fb_job, _FakeFB([requests.Timeout("test-token")]))
+    with pytest.raises(ValueError, match="結果不明"):
+        facebook.upload(fb_job, _FakeFB([]))
+
+
+@pytest.mark.parametrize(
+    "status,phase",
+    [
+        ({"video_status": "error"}, "failed"),
+        ({"video_status": "processing", "processing_phase": {"status": "error"}}, "failed"),
+        ({"video_status": "ready", "publishing_phase": {"publish_status": "published"}}, "published"),
+    ],
+)
+def test_facebook_processing_error_is_recorded_as_terminal_phase(fb_job, status, phase):
+    from videomaker import facebook
+
+    with pytest.raises(RuntimeError):
+        facebook.upload(
+            fb_job, _FakeFB([_FB_START, {"success": True}, {"success": True}, {"status": status}])
+        )
+    assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == phase
+    again = _FakeFB([])
+    with pytest.raises(RuntimeError, match="Meta"):
+        facebook.upload(fb_job, again)  # 終態不盲目重試，也不連線
+    assert again.calls == []
+
+
+def test_facebook_upload_uses_opened_approved_file_if_path_is_replaced(fb_job, monkeypatch):
+    from videomaker import facebook
+
+    original = (fb_job / "final.mp4").read_bytes()
+
+    def replace_path(stream):
+        new = fb_job / "new.mp4"
+        new.write_bytes(b"not approved")
+        new.replace(fb_job / "final.mp4")
+
+    monkeypatch.setattr(facebook, "_check_video", replace_path)
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, _FB_READY])
+    facebook.upload(fb_job, client)
+    assert client.calls[1][2]["data"] == original
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://rupload.facebook.com/video-upload/v25.0/456",
+        "https://evil.example/video-upload/v25.0/456",
+        "https://rupload.facebook.com.evil.example/video-upload/v25.0/456",
+        "https://rupload.facebook.com/video-upload/v25.0/456?access_token=secret",
+    ],
+)
+def test_facebook_rejects_upload_urls_that_could_expose_token(fb_job, url):
+    from videomaker import facebook
+
+    client = _FakeFB([{**_FB_START, "upload_url": url}])
+    with pytest.raises(ValueError, match="網址無效"):
+        facebook.upload(fb_job, client)
+    assert len(client.calls) == 1
+
+
+def test_facebook_api_errors_do_not_expose_response_text_or_tokens():
+    from videomaker import facebook
+
+    with pytest.raises(RuntimeError, match="code 190") as error:
+        facebook._request(
+            _FakeFB([{"error": {"code": 190, "message": "secret-token"}}]),
+            "POST",
+            "https://graph.facebook.com/v25.0/me",
+            "secret-token",
+        )
+    assert "secret-token" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "duration,width,height,fps,allowed",
+    [
+        (20, 1080, 1920, "24/1", True),
+        (60, 540, 960, "30000/1001", True),
+        (168, 1080, 1920, "24/1", False),
+        (3, 1080, 1920, "24/1", False),
+        (20, 1920, 1080, "24/1", False),
+        (20, 540, 960, "22/1", False),
+    ],
+)
+def test_facebook_checks_actual_video_before_upload(
+    tmp_path, monkeypatch, duration, width, height, fps, allowed
+):
+    from videomaker import facebook
+
+    class Probe:
+        stdout = json.dumps(
+            {
+                "format": {"duration": duration},
+                "streams": [{"width": width, "height": height, "avg_frame_rate": fps}],
+            }
+        )
+
+    calls = []
+    monkeypatch.setattr(facebook.subprocess, "run", lambda *a, **k: calls.append((a, k)) or Probe())
+    path = tmp_path / "final.mp4"
+    path.write_bytes(b"test")
+    with path.open("rb") as stream:
+        if allowed:
+            facebook._check_video(stream)
+        else:
+            with pytest.raises(ValueError, match="4–60"):
+                facebook._check_video(stream)
+        assert calls[0][1]["pass_fds"] == (stream.fileno(),)
+
+
+def test_facebook_auth_stores_credentials_outside_project_with_private_permissions(
+    tmp_path, monkeypatch, caplog
+):
+    from videomaker import facebook
+
+    monkeypatch.setattr(config, "FB_DIR", tmp_path / "cred")
+    monkeypatch.setattr("builtins.input", lambda prompt: "123")
+    monkeypatch.setattr(facebook.getpass, "getpass", lambda prompt: "secret-token")
+    facebook.auth()
+    path = tmp_path / "cred" / "facebook.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text())["page_id"] == "123"
+    assert "secret-token" not in caplog.text
+    monkeypatch.setattr(config, "FB_DIR", config.ROOT)
+    with pytest.raises(ValueError, match="專案外"):
+        facebook.auth()
+
+
+def test_cli_facebook_upload_prints_only_video_id(fb_job, monkeypatch, capsys):
+    from videomaker import __main__ as cli
+
+    calls = []
+    monkeypatch.setattr(cli.facebook, "upload", lambda path: calls.append(path) or "456")
+    cli.main(["upload-facebook", str(fb_job)])
+    assert calls == [fb_job] and capsys.readouterr().out == "456\n"
+    monkeypatch.setattr(cli.facebook, "auth", lambda: calls.append("auth"))
+    cli.main(["facebook-auth"])
+    assert calls[-1] == "auth"
+
+
+def test_facebook_rejects_approval_based_on_sources(fb_job):
+    from videomaker import facebook
+
+    path = fb_job / "status.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "approved_basis": "sources"}))
+    client = _FakeFB([])
+    with pytest.raises(ValueError, match="來源"):
+        facebook.upload(fb_job, client)  # 來源核准的例外只限 YouTube，FB 必須人工看片
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"video_status": "ready"},
+        {"video_status": "ready", "publishing_phase": {"status": "complete"}},
+        {"video_status": "ready", "publishing_phase": {"publish_status": "unknown"}},
+    ],
+)
+def test_facebook_requires_positive_draft_confirmation(fb_job, status):
+    from videomaker import facebook
+
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, *[{"status": status}] * 30])
+    with pytest.raises(TimeoutError, match="確認"):
+        facebook.upload(fb_job, client)
+    assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == "processing"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [(400, {"error": {"code": 190}}), requests.ConnectTimeout("test-token")],
+)
+def test_facebook_definite_start_failure_does_not_block_retry(fb_job, outcome):
+    from videomaker import facebook
+
+    with pytest.raises(RuntimeError):
+        facebook.upload(fb_job, _FakeFB([outcome]))
+    assert "facebook_reel" not in json.loads((fb_job / "meta.json").read_text())
+    client = _FakeFB([_FB_START, {"success": True}, {"success": True}, _FB_READY])
+    assert facebook.upload(fb_job, client) == "456"  # 換好 token 直接重跑，不必手改 meta.json
+
+
+def test_facebook_server_error_on_start_stays_ambiguous(fb_job):
+    from videomaker import facebook
+
+    with pytest.raises(RuntimeError):
+        facebook.upload(fb_job, _FakeFB([(500, {"error": {"code": 2}})]))
+    with pytest.raises(ValueError, match="結果不明"):
+        facebook.upload(fb_job, _FakeFB([]))
+
+
+def test_facebook_rejects_non_ascii_token_before_network():
+    from videomaker import facebook
+
+    with pytest.raises(ValueError, match="token"):
+        facebook._validate_credentials({"page_id": "123", "page_access_token": "權杖"})
+
+
+def test_facebook_keeps_video_id_when_upload_url_is_invalid(fb_job):
+    from videomaker import facebook
+
+    bad = {**_FB_START, "upload_url": "https://evil.example/video-upload/v25.0/456"}
+    with pytest.raises(ValueError, match="網址無效"):
+        facebook.upload(fb_job, _FakeFB([bad]))
+    reel = json.loads((fb_job / "meta.json").read_text())["facebook_reel"]
+    assert reel["video_id"] == "456" and reel["phase"] == "created"
+
+
+def test_facebook_finishing_resume_polls_before_resending_finish(fb_job):
+    from videomaker import facebook
+
+    lost = requests.Timeout("finish response lost")
+    with pytest.raises(RuntimeError):
+        facebook.upload(fb_job, _FakeFB([_FB_START, {"success": True}, lost]))
+    assert json.loads((fb_job / "meta.json").read_text())["facebook_reel"]["phase"] == "finishing"
+    received = _FakeFB([{"status": {"video_status": "processing"}}, _FB_READY])
+    assert facebook.upload(fb_job, received) == "456"
+    assert all(c[0] == "GET" for c in received.calls)  # Meta 已收到 finish：不重送
+
+
+def test_facebook_finishing_resume_resends_finish_when_meta_never_got_it(fb_job):
+    from videomaker import facebook
+
+    lost = requests.Timeout("finish never arrived")
+    with pytest.raises(RuntimeError):
+        facebook.upload(fb_job, _FakeFB([_FB_START, {"success": True}, lost]))
+    idle = {"status": {"video_status": "uploading", "uploading_phase": {"status": "complete"}}}
+    resumed = _FakeFB([idle, {"success": True}, _FB_READY])
+    assert facebook.upload(fb_job, resumed) == "456"
+    assert [c[0] for c in resumed.calls] == ["GET", "POST", "GET"]
+
+
+def test_facebook_finished_draft_needs_no_credentials_or_plan(fb_job):
+    from videomaker import facebook
+
+    facebook.upload(fb_job, _FakeFB([_FB_START, {"success": True}, {"success": True}, _FB_READY]))
+    (config.FB_DIR / "facebook.json").unlink()
+    (fb_job / "plan.json").write_text("{")
+    client = _FakeFB([])
+    assert facebook.upload(fb_job, client) == "456" and client.calls == []
+
+
+def test_facebook_polls_outside_the_upload_lock_without_clobbering_meta(fb_job):
+    import fcntl
+
+    from videomaker import facebook
+
+    free = []
+
+    class Probe(_FakeFB):
+        def request(self, method, url, **kwargs):
+            if method == "GET":
+                with (fb_job / ".upload.lock").open("a") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        free.append(True)
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                    except BlockingIOError:
+                        free.append(False)
+                meta = json.loads((fb_job / "meta.json").read_text())
+                (fb_job / "meta.json").write_text(json.dumps({**meta, "youtube_id": "uploaded-meanwhile"}))
+            return super().request(method, url, **kwargs)
+
+    client = Probe([_FB_START, {"success": True}, {"success": True}, _FB_READY])
+    assert facebook.upload(fb_job, client) == "456"
+    assert free == [True]  # 輪詢期間 approve／reject／YouTube 上傳不必等
+    saved = json.loads((fb_job / "meta.json").read_text())
+    assert saved["youtube_id"] == "uploaded-meanwhile" and saved["facebook_reel"]["phase"] == "draft"
+
+
+def test_facebook_auth_failure_keeps_previous_credentials(tmp_path, monkeypatch):
+    from videomaker import facebook
+
+    monkeypatch.setattr(config, "FB_DIR", tmp_path / "cred")
+    monkeypatch.setattr(facebook.getpass, "getpass", lambda prompt: "secret-token")
+    monkeypatch.setattr("builtins.input", lambda prompt: "123")
+    facebook.auth()
+    monkeypatch.setattr("builtins.input", lambda prompt: "999")
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(facebook.json, "dump", broken)
+    with pytest.raises(OSError):
+        facebook.auth()
+    path = tmp_path / "cred" / "facebook.json"
+    assert json.loads(path.read_text())["page_id"] == "123"  # 舊憑證不被截斷
+    assert path.stat().st_mode & 0o777 == 0o600

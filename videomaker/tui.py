@@ -15,7 +15,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Label, Static
 
-from . import jobs, youtube
+from . import facebook, jobs, youtube
 
 REFRESH_SECONDS = 120
 
@@ -30,6 +30,14 @@ def state_text(r: dict) -> str:
     if r["active"]:
         return "進行中"
     return "未完成" if r["gx10"] else "—"
+
+
+FB_PHASE_ZH = {"draft": "草稿", "failed": "失敗", "published": "已發布"}
+
+
+def facebook_text(r: dict) -> str:
+    reel = r.get("facebook_reel")
+    return FB_PHASE_ZH.get(reel["phase"], "待完成") if reel else "-"
 
 
 def _mb(n: int) -> str:
@@ -110,6 +118,7 @@ class VM(App):
         Binding("x", "reject", "不通過"),
         Binding("u", "upload", "上傳"),
         Binding("U", "upload_all", "上傳全部已核准"),
+        Binding("f", "upload_facebook", "FB草稿"),
         Binding("g", "delete_gx10", "刪GX10"),
         Binding("m", "delete_local", "刪Mac"),
         Binding("T", "token", "token"),
@@ -131,7 +140,7 @@ class VM(App):
 
     def on_mount(self) -> None:
         self.query_one(DataTable).add_columns(
-            "選", "狀態", "視覺 QC", "主題", "片型", "長度", "大小", "YouTube", "GX10", "Mac", "資料夾"
+            "選", "狀態", "視覺 QC", "主題", "片型", "長度", "大小", "YouTube", "FB", "GX10", "Mac", "資料夾"
         )
         self.action_refresh()
         self.set_interval(REFRESH_SECONDS, self.action_refresh)
@@ -157,7 +166,7 @@ class VM(App):
         for r in self.data:
             table.add_row(
                 "✅" if r["name"] in self.selected else "⬜", state_text(r), visual_text(r), r["topic"], r["format"], f"{r['duration']:.0f}s" if r["duration"] else "-", _mb(r["size"]),
-                r["youtube_id"] or "-", *("●" if r[k] else "·" for k in ("gx10", "mac")), r["name"], key=r["name"],
+                r["youtube_id"] or "-", facebook_text(r), *("●" if r[k] else "·" for k in ("gx10", "mac")), r["name"], key=r["name"],
             )  # fmt: skip
         if keep and any(r["name"] == keep for r in self.data):
             table.move_cursor(row=table.get_row_index(keep))
@@ -213,6 +222,11 @@ class VM(App):
             if r["youtube_id"]
             else "YouTube：尚未上傳",
         ]
+        reel = r.get("facebook_reel")
+        if reel:
+            lines.append(
+                f"FB：{escape(reel.get('phase', '-'))}　影片 ID：{escape(reel.get('video_id', '-'))}（發布請到 Meta 操作）"
+            )
         visual = r.get("visual_qc") or {}
         lines += ["", f"[b]視覺 QC：{visual_text(r)}[/b]"]
         if visual:
@@ -328,6 +342,26 @@ class VM(App):
         self.ask(
             f"上傳 {n} 支已核准的影片（全部私人）？",
             lambda: self.run_task("上傳全部已核准", lambda: jobs.remote_cli("upload-approved")),
+        )
+
+    def action_upload_facebook(self) -> None:
+        r = self.current()
+        if not r:
+            return
+        if r["active"]:
+            return self.say("這支正在處理中，請等 QC 完成再上傳", True)
+        if not r["gx10"] or not r["size"]:
+            return self.say("GX10 上沒有這支的成片，無法上傳 FB 草稿", True)
+        if r["duration"] and not facebook.MIN_SECONDS <= r["duration"] <= facebook.MAX_SECONDS:
+            return self.say(
+                f"FB Reels 只收 {facebook.MIN_SECONDS}–{facebook.MAX_SECONDS} 秒的短片，這支不符", True
+            )
+        if r["status"] != "approved":
+            return self.say("請先按 o 看片、按 a 人工核准，再上傳 FB 草稿", True)
+        if (r.get("facebook_reel") or {}).get("phase") == "draft":
+            return self.say("這支已上傳 FB 草稿；請到 Meta 檢查或發布")
+        self.run_task(
+            f"上傳 FB 草稿 {r['topic']}（不發布）", lambda: jobs.remote_cli("upload-facebook", r["name"])
         )
 
     def action_toggle_select(self) -> None:

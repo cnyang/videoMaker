@@ -89,7 +89,7 @@ def video_sha256(job_dir: Path) -> str:
 
 
 @contextmanager
-def _locked(job_dir: Path):
+def locked(job_dir: Path):
     # 鎖檔不能刪：不同 TUI／CLI 行程必須鎖住同一個 inode，才能保證只上傳一次
     with (job_dir / ".upload.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -99,7 +99,7 @@ def _locked(job_dir: Path):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def _save(path: Path, data: dict) -> None:
+def save_json(path: Path, data: dict) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     temp.replace(path)
@@ -109,7 +109,7 @@ def set_review(
     job_dir: Path, status: str, expected_sha256: str | None = None, basis: str | None = None
 ) -> None:
     """人工審核結果：approved / rejected，寫回 status.json。basis 記錄核准依據（合輯來源核准記 "sources"）。"""
-    with _locked(job_dir):
+    with locked(job_dir):
         path = job_dir / "status.json"
         st = json.loads(path.read_text())
         st.pop("approved_basis", None)  # 重新審核就不沿用上一次的依據
@@ -123,7 +123,7 @@ def set_review(
         else:
             st.pop("approved_sha256", None)
         st |= {"status": status, "reviewed_at": datetime.now().astimezone().isoformat(timespec="seconds")}
-        _save(path, st)
+        save_json(path, st)
 
 
 def sources_approved(job_dir: Path) -> bool | None:
@@ -155,7 +155,7 @@ def approve_from_sources(job_dir: Path) -> None:
 
 def upload(job_dir: Path, service=None) -> str:
     """上傳一支已核准的成片（私人）。已上傳過就直接回傳既有的 id（冪等）。"""
-    with _locked(job_dir):
+    with locked(job_dir):
         return _upload(job_dir, service)
 
 
@@ -198,7 +198,7 @@ def _upload(job_dir: Path, service) -> str:
             "youtube_uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "youtube_privacy": resp.get("status", {}).get("privacyStatus"),  # API 回傳的實際隱私狀態，當證據
         }
-        _save(meta_path, meta)
+        save_json(meta_path, meta)
         log.info("已上傳（私人）：https://studio.youtube.com/video/%s/edit", resp["id"])
         return resp["id"]
 

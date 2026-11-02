@@ -42,7 +42,7 @@ def test_destructive_and_download_calls_reject_bad_names_without_running_anythin
     with pytest.raises(ValueError, match="不允許"):
         jobs.remote_cli("approve", "2026-10-05_a;rm -rf ~")
     with pytest.raises(ValueError, match="不允許"):
-        jobs.remote_cli("shell")  # 只允許四個審核／上傳子指令
+        jobs.remote_cli("shell")  # 只允許白名單內的審核／上傳子指令
     assert called == []  # 一個遠端指令都沒有送出
 
 
@@ -325,6 +325,46 @@ def test_tui_upload_flows(monkeypatch):
     env.calls.clear()
     drive(env, "down", "down", "u")
     assert env.calls == []  # 已上傳過的不會重複
+
+
+def test_tui_facebook_upload_is_independent_from_youtube_and_requires_approval(monkeypatch):
+    row = _row(GOOD[0], "approved", vid="already-on-youtube")
+    env = Env(monkeypatch, [row])
+    drive(env, "f")
+    assert env.calls == [("cli", "upload-facebook", GOOD[0])]
+    env.calls.clear()
+    row["facebook_reel"] = {"phase": "draft", "video_id": "456"}
+    seen = {}
+    drive(env, "f", lambda app: seen.update(row=app.query_one(tui.DataTable).get_row_at(0)))
+    assert env.calls == [] and "草稿" in seen["row"]
+    row.pop("facebook_reel")
+    for status, active, gx10 in [
+        ("pending_review", False, True),
+        ("failed", False, True),
+        ("approved", True, True),
+        ("approved", False, False),
+    ]:
+        row.update(status=status, active=active, gx10=gx10)
+        drive(env, "f")
+        assert env.calls == []
+
+
+def test_remote_cli_allows_facebook_upload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(jobs, "_gx", lambda remote, timeout: calls.append(remote) or _P(out="456"))
+    assert jobs.remote_cli("upload-facebook", GOOD[0]) == "456"
+    assert calls == [f"cd ~/code/videoMaker && .venv/bin/python -m videomaker upload-facebook {GOOD[0]}"]
+
+
+def test_inventory_includes_facebook_draft_without_affecting_youtube(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK", tmp_path)
+    directory = tmp_path / GOOD[0]
+    directory.mkdir()
+    (directory / "plan.json").write_text(json.dumps({"topic": "FB test"}))
+    reel = {"phase": "draft", "video_id": "456"}
+    (directory / "meta.json").write_text(json.dumps({"youtube_id": "abc", "facebook_reel": reel}))
+    row = jobs.inventory()[0]
+    assert row["facebook_reel"] == reel and row["youtube_id"] == "abc"
 
 
 def test_tui_upload_all_counts_only_approved_not_uploaded(monkeypatch):
@@ -726,3 +766,18 @@ def test_tui_merge_with_unapproved_sources_or_failed_qc_still_needs_manual_revie
             GOOD[0],
             f"--sha256={DIGEST}",
         )  # 走人工核准，不用 --from-sources
+
+
+def test_tui_facebook_checks_duration_locally_and_shows_terminal_phases(monkeypatch):
+    row = _row(GOOD[0], "approved")
+    env = Env(monkeypatch, [row])
+    for duration in (3.0, 168.0):
+        row["duration"] = duration
+        drive(env, "f")
+        assert env.calls == []  # FB 只收 4–60 秒：不必白跑一趟 ssh
+    row["duration"] = 20.0
+    for phase, label in (("failed", "失敗"), ("published", "已發布"), ("processing", "待完成")):
+        row["facebook_reel"] = {"phase": phase, "video_id": "456"}
+        seen = {}
+        drive(env, lambda app, seen=seen: seen.update(row=app.query_one(tui.DataTable).get_row_at(0)))
+        assert label in seen["row"]

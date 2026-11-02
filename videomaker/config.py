@@ -25,6 +25,8 @@ CHARACTERS = Path(
 FONT = os.getenv(
     "VMK_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 )  # 小知識字幕用的字型（GX10 內建 DejaVu）
+FB_DIR = Path(os.getenv("VMK_FB_DIR", "~/.config/videomaker")).expanduser()
+FB_API_VERSION = os.getenv("VMK_FB_API_VERSION", "v25.0")
 
 
 # ---------- H3 renderer（2026-10-22 使用者放行；授權地區限制見 LICENSES.md。VMK_H3_ENABLED=0 可一鍵關閉）----------

@@ -1,3 +1,5 @@
+"""CLI 入口：所有子指令在 build_parser／main 分派（用法見 docs/operations.md）。"""
+
 import argparse
 import json
 import logging
@@ -5,7 +7,7 @@ from pathlib import Path
 
 import requests
 
-from . import characters, comfy, config, jobs, labeling, nightly, pipeline, weekly, youtube
+from . import characters, comfy, config, facebook, jobs, labeling, nightly, pipeline, weekly, youtube
 from .pipeline import STAGES
 from .plan import DIALOGUE_KINDS
 
@@ -62,10 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="手動合併：每種內容各按片型，把近期夜間成片串成一支（不用 GPU；夜間排程結束後會自動做一次）",
     )
     sub.add_parser("auth", help="YouTube OAuth 授權（在有瀏覽器的機器上跑一次）")
+    sub.add_parser("facebook-auth", help="互動設定 Facebook Page ID 與 token（存專案外，不回顯 token）")
     for name, h in (
         ("approve", "人工核准一支成片（之後才能上傳）"),
         ("reject", "標記一支成片為不通過"),
         ("upload", "上傳一支已核准的成片（私人）"),
+        ("upload-facebook", "上傳一支已核准的短片到 Facebook 粉絲專頁（草稿，不發布）"),
     ):
         review = sub.add_parser(name, help=h)
         review.add_argument("job", help="作業資料夾名（work/ 底下）或完整路徑")
@@ -109,6 +113,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.cmd == "auth":
         youtube.auth()
+    elif a.cmd == "facebook-auth":
+        facebook.auth()
     elif a.cmd == "approve" and a.from_sources:
         youtube.approve_from_sources(youtube.resolve(a.job))
     elif a.cmd in ("approve", "reject"):
@@ -119,6 +125,8 @@ def main(argv=None):
         )
     elif a.cmd == "upload":
         print(youtube.upload(youtube.resolve(a.job)))
+    elif a.cmd == "upload-facebook":
+        print(facebook.upload(youtube.resolve(a.job)))
     elif a.cmd == "token-status":
         status = youtube.token_status()
         print(status)
