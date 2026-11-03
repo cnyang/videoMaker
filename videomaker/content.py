@@ -300,6 +300,9 @@ Use 2 characters. Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots."""
     "animal_sitcom": """THIS IS A FUNNY ANIMAL SITCOM about everyday life (office, home, food, napping, going out, games, small misunderstandings, a small twist at the end).
 Extra keys: "episode_title": str, "setting": str, "hook": str (the first-seconds attention grabber). The cast is EXACTLY the two husky leads: "characters" must be ["husky_01", "husky_02"] (Meatball and HappySunny), and nobody else appears on screen.
 Meatball and HappySunny are real-looking huskies with different personalities: let their personalities drive the jokes.
+Craft rules: the FIRST shot must work as a hook on its own (a visible conflict or an odd image), never something that only makes sense after the next line.
+Every shot must change something visible (who has the snack, who is winning, how they feel); merge or drop a shot that changes nothing.
+Show, do not tell: never let dialogue repeat what the picture already shows; keep only lines that carry an action, a want or a conflict, and cut the rest.
 Shot keys: {"shot_id": 1, "duration": 6, "characters": [...], "action": str, "emotion": str, "camera": str, "dialogue": [...], "reference_assets": ["husky_01/front"]}.
 reference_assets entries are "<character id>/<view>" using the listed reference views, e.g. "husky_02/happy" for a joyful shot. Keep the same character look in every shot.
 Total %(tmin)g-%(tmax)g seconds in %(nmin)d-%(nmax)d shots. Example arc: Meatball spots the last snack -> sneaks toward it -> HappySunny cheerfully catches him -> they argue about sharing -> a small twist (the snack is gone anyway).""",

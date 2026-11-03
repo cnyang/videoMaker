@@ -639,3 +639,9 @@ def test_catalog_shows_leads_only_to_animal_sitcom():
         assert "husky" not in content.catalog(kind) and "bear_01" in content.catalog(kind)
     assert "photorealistic" in content.system_prompt("animal_sitcom")
     assert "flat 2D cartoon" in content.system_prompt("dialogue_animation")
+
+
+def test_animal_sitcom_prompt_has_craft_rules():
+    # 寫作手藝規則只給動物短劇；其他對白類不套用
+    assert "Craft rules" in content.system_prompt("animal_sitcom")
+    assert "Craft rules" not in content.system_prompt("kids_english_dialogue")
