@@ -7,7 +7,20 @@ from pathlib import Path
 
 import requests
 
-from . import characters, comfy, config, facebook, jobs, labeling, nightly, pipeline, weekly, youtube
+from . import (
+    characters,
+    comfy,
+    config,
+    content,
+    facebook,
+    jobs,
+    labeling,
+    nightly,
+    pipeline,
+    renderers,
+    weekly,
+    youtube,
+)
 from .pipeline import STAGES
 from .plan import DIALOGUE_KINDS
 
@@ -32,6 +45,21 @@ def build_parser() -> argparse.ArgumentParser:
         "kids_english_dialogue／animal_sitcom／dialogue_animation = 對白類（topic 填繁體中文主題，只支援 short，需啟用 H3）",
     )
     mk.add_argument("--dry-run", action="store_true", help="只產 plan.json，不呼叫 ComfyUI")
+    src = mk.add_mutually_exclusive_group()
+    src.add_argument(
+        "--outline",
+        type=Path,
+        metavar="FILE",
+        help="自己的繁體中文劇情大綱（UTF-8 文字檔，僅對白類）：LLM 依它修飾成分鏡腳本再製作；"
+        "topic 當標題。只用於新作業，續跑不用再給（大綱已記在 meta.json）",
+    )
+    src.add_argument(
+        "--story",
+        type=Path,
+        metavar="FILE",
+        help="自己寫好的完整繁體中文劇情（誰做什麼、誰說什麼；僅對白類）：嚴格照稿，LLM 只翻成英文對白、"
+        "切成分鏡，不增刪事件；放不進時長／鏡頭限制就報錯，由你改稿。其餘同 --outline",
+    )
     mk.add_argument(
         "--images",
         type=Path,
@@ -108,6 +136,22 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _start_from_outline(a: argparse.Namespace) -> None:
+    """`make --outline`：用使用者的大綱建立作業；之後交給 pipeline.run(resume=True) 照常續跑。
+
+    pipeline.run 的簽名不能再加參數（夜間測試依賴），所以大綱只走 new_job。"""
+    if a.resume:
+        raise SystemExit("--outline／--story 只用於新作業；續跑請去掉它（原文已記在 meta.json）")
+    path = a.story or a.outline
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise SystemExit(f"檔案是空的：{path}")
+    if a.kind in DIALOGUE_KINDS and not a.dry_run:
+        renderers.require(content.renderer_for(a.kind))  # 同 pipeline.run：renderer 沒啟用就別花 LLM 時間
+    pipeline.new_job(a.topic, a.images, a.format, a.kind, outline=text, strict=bool(a.story))
+    a.resume = True
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -174,6 +218,8 @@ def main(argv=None):
             print(f"缺：{f}（{wf}）")
         raise SystemExit(1 if miss else print("模型齊全"))
     else:
+        if a.outline or a.story:
+            _start_from_outline(a)
         job = pipeline.run(a.topic, a.stage, a.dry_run, a.resume, a.images, a.format, a.kind)
         print(job.dir)
 

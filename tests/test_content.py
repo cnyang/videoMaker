@@ -258,6 +258,55 @@ def test_make_script_requires_bilingual_youtube_fields(monkeypatch):
     assert "youtube.title" in llm.calls[1]["messages"][-1]["content"]
 
 
+# ---------- 使用者自己的劇情大綱 ----------
+OUTLINE = (
+    "Meatball 偷看到最後一塊餅乾，躡手躡腳靠近；HappySunny 笑著抓包。兩隻爭論要不要分，結果餅乾早就不見了。"
+)
+
+
+def test_make_script_puts_the_traditional_chinese_outline_in_the_user_message(monkeypatch):
+    llm = FakeLLM([json.dumps(english())])
+    monkeypatch.setattr(content.requests, "post", llm.post)
+    content.make_script("kids_english_dialogue", "餅乾", OUTLINE)
+    first = llm.calls[0]["messages"][1]["content"]
+    assert OUTLINE in first and "<outline>" in first  # 大綱原文用標籤隔開，當故事素材而非指令
+    assert "Keep the outline's" in first  # 要求忠於大綱的角色、事件順序與結局
+
+
+def test_make_script_without_outline_keeps_the_original_user_message(monkeypatch):
+    llm = FakeLLM([json.dumps(english())])
+    monkeypatch.setattr(content.requests, "post", llm.post)
+    content.make_script("kids_english_dialogue", "餅乾")
+    assert "<outline>" not in llm.calls[0]["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("outline", ["   \n", "字" * (content.MAX_OUTLINE + 1)])
+def test_make_script_rejects_blank_or_oversized_outline_before_calling_llm(monkeypatch, outline):
+    llm = FakeLLM([])
+    monkeypatch.setattr(content.requests, "post", llm.post)
+    with pytest.raises(ValueError, match="大綱"):
+        content.make_script("animal_sitcom", "餅乾", outline)
+    assert llm.calls == []
+
+
+# ---------- 使用者完整劇情（嚴格照稿） ----------
+def test_make_script_strict_story_forbids_changing_the_plot(monkeypatch):
+    llm = FakeLLM([json.dumps(english())])
+    monkeypatch.setattr(content.requests, "post", llm.post)
+    content.make_script("kids_english_dialogue", "餅乾", OUTLINE, strict=True)
+    first = llm.calls[0]["messages"][1]["content"]
+    assert OUTLINE in first and "<story>" in first and "<outline>" not in first
+    assert "WITHOUT changing the story" in first and "cannot_fit" in first  # 放不進就回報，不准自己刪
+
+
+def test_make_script_strict_story_that_cannot_fit_fails_at_once_without_retry(monkeypatch):
+    llm = FakeLLM([json.dumps({"cannot_fit": "劇情有 9 個事件，放不進 6 鏡"})])
+    monkeypatch.setattr(content.requests, "post", llm.post)
+    with pytest.raises(RuntimeError, match="放不進.*9 個事件"):
+        content.make_script("animal_sitcom", "餅乾", OUTLINE, strict=True)
+    assert len(llm.calls) == 1 and llm.unloaded == 1  # 不是驗證錯誤：不重寫、不讓 LLM 偷刪劇情
+
+
 # ---------- Plan 相容性 ----------
 def test_plan_music_is_still_required_for_music_kinds_and_old_plans_load():
     plan = {

@@ -126,7 +126,7 @@ videoMaker() {
 ### `make` — 產生一支影片
 
 ```
-videoMaker make "主題" [--kind kids|trivia|kids_english_dialogue|animal_sitcom|dialogue_animation] [--format short|long|xl] [--stage <階段>] [--images DIR [DIR]] [--dry-run] [--resume]
+videoMaker make "主題" [--kind kids|trivia|kids_english_dialogue|animal_sitcom|dialogue_animation] [--format short|long|xl] [--stage <階段>] [--images DIR [DIR]] [--outline FILE | --story FILE] [--dry-run] [--resume]
 ```
 
 | 選項 | 說明 |
@@ -136,6 +136,8 @@ videoMaker make "主題" [--kind kids|trivia|kids_english_dialogue|animal_sitcom
 | `--stage` | 「跑到這個階段為止」，已完成的階段會跳過。可選：`plan`、`music`、`keyframes`、`clips`、`mux`、`qc`（預設到 `qc`） |
 | `--images DIR [DIR]` | 照片模式：1 個資料夾 = 用你的照片當關鍵幀；2 個資料夾 = 兩隻狗同框。見[片型與照片模式](#片型與照片模式) |
 | `--kind` | 內容種類，預設 `kids`（兒童音樂）。對白類三種的 `主題` 填繁體中文短語、只支援 `--format short`，需要先啟用 H3，見[對白類內容](#對白類內容兒童英文對話動物短劇有對白的動畫) |
+| `--outline FILE` | 自己的繁體中文劇情大綱（UTF-8 文字檔，最多 4000 字，**僅對白類**）：LLM 依大綱修飾成分鏡腳本，再照常製作；`主題` 當標題。只用於新作業（不能與 `--resume` 併用，大綱已記在 `meta.json.outline`）。見[自己的劇情大綱](#自己的劇情大綱) |
+| `--story FILE` | 自己寫好的**完整**繁體中文劇情（誰做什麼、誰說什麼），**嚴格照稿**，與 `--outline` 互斥。見[自己的劇情大綱](#自己的劇情大綱) |
 | `--dry-run` | 只產 `plan.json`，不呼叫 ComfyUI（對白類不需要啟用 H3 就能 dry-run） |
 | `--resume` | 續跑「同主題、同 `--kind`、同 `--format`」建立時間最新的作業；小知識的既有正式標題可離線續跑，別名才需要查維基。每階段輸出已存在就跳過；重合成先產生暫存影片與縮圖，兩者都成功才發布，失敗可重試 |
 
@@ -437,6 +439,18 @@ videoMaker make "<主題>" --kind animal_sitcom --stage clips
 ```
 
 重做 fl2va 某鏡的關鍵幀要一併刪 `keyframes/02.png`。
+
+### 自己的劇情大綱
+
+```bash
+# 大綱檔（繁體中文，UTF-8）：寫角色、事件順序、結局或反轉即可，不必寫分鏡與英文對白
+videoMaker make "餅乾風波" --kind animal_sitcom --outline outline.md --dry-run   # 先看 plan.json
+videoMaker make "餅乾風波" --kind animal_sitcom --resume                         # 滿意再製作（不用再給 --outline）
+```
+
+LLM 只做「修飾」：保留大綱的角色、事件順序與結局，補上可見動作與自然的英文對白（腳本欄位仍須純英文），過長就合併或刪次要段落；大綱提到的角色若不在 `animal_sitcom` 的兩隻主角內，會改由主角演出。腳本驗證規則不變（禁用字詞、語速、鏡頭長度…），驗證失敗照舊最多重寫 3 次。不滿意 `plan.json` 就改大綱重跑 `--outline`（同日同主題會另開 `-2` 資料夾）。大綱原文存在 `meta.json.outline`；審核與上傳（永遠私人）完全不變。不能用於兒童音樂與小知識。
+
+**連劇情都自己寫：`--story FILE`**（同上流程，改用 `--story`）。LLM 只把你的劇情切成分鏡、台詞翻成保留原意與語氣的英文、補必要的場景與鏡位，**不增刪、不合併、不調換事件與台詞**。劇情放不進限制（動物短劇 20–45 秒、3–6 鏡、語速 ≤ 3 詞／秒）或需要主角以外的角色時，LLM 會回報 `cannot_fit`，指令直接失敗並顯示原因（`StoryCannotFit`，不重試、不自動刪稿），請自己改稿再跑。注意 LLM 仍可能悄悄改動，正式製作前一定要看 `plan.json`；`meta.json` 會記 `outline_strict: true`。
 
 ### 啟用 H3 的前置條件
 

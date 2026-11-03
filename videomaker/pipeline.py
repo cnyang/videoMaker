@@ -186,14 +186,28 @@ def _use_photos(plan: Plan, srcs: list[Path], d: Path) -> list[dict]:
     return used
 
 
-def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", kind: str = "kids") -> Job:
+def new_job(
+    topic: str,
+    images: list[Path] | None = None,
+    fmt: str = "short",
+    kind: str = "kids",
+    outline: str | None = None,
+    strict: bool = False,
+) -> Job:
     t = time.monotonic()
     bpm = config.DEFAULT_BPM
     article = None
+    if outline is not None:
+        outline = outline.strip()
+        if kind not in DIALOGUE_KINDS:
+            raise ValueError("--outline 只支援對白類（兒童音樂與小知識的內容由程式決定）")
     if kind in DIALOGUE_KINDS:  # 對白類：LLM 寫結構化腳本（鏡頭與對白），沒有 BPM、拍點與重複使用鏡頭
         if fmt not in KINDS[kind] or images:
             raise ValueError(f"{kind} 只支援片型 {'／'.join(KINDS[kind])}，且不能搭配照片模式")
-        plan = content.make_script(kind, topic)
+        # 沒給大綱就維持原本的呼叫方式（既有測試的 fake 只收 kind、topic）
+        plan = content.make_script(
+            kind, topic, **({} if outline is None else {"outline": outline, "strict": strict})
+        )
     else:
         _, n_slots, _ = shot_math(bpm, fmt)
         n_unique = FORMATS[fmt]["unique"] or n_slots
@@ -236,6 +250,10 @@ def new_job(topic: str, images: list[Path] | None = None, fmt: str = "short", ki
     if article:  # 來源證據：條目標題、固定版本的連結與授權
         meta["kind"] = "trivia"
         meta["wikipedia"] = {"title": article.title, "url": article.permalink, "license": "CC BY-SA 4.0"}
+    if outline is not None:
+        meta["outline"] = outline  # 使用者原文留作來源證據（腳本是 LLM 依它修飾的）
+        if strict:
+            meta["outline_strict"] = True  # 完整劇情、嚴格照稿
     if used:
         meta["images"] = used  # 使用者提供的照片（自有素材），記錄檔名與 sha256 當來源證據
     (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")

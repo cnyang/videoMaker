@@ -307,6 +307,90 @@ def test_new_job_for_dialogue_kinds_writes_script_plan_and_renderer_without_musi
             pipeline.new_job("想吃什麼", kind="kids_english_dialogue", **bad)
 
 
+def test_new_job_passes_the_outline_to_the_script_writer_and_records_it_in_meta(work, monkeypatch):
+    script = content.SPECS["animal_sitcom"].schema.model_validate(SCRIPTS["animal_sitcom"]())
+    seen = {}
+
+    def fake_make_script(kind, topic, outline=None, strict=False):
+        seen.update(outline=outline, strict=strict)
+        return content.to_plan(script, topic)
+
+    monkeypatch.setattr(content, "make_script", fake_make_script)
+    job = pipeline.new_job("餅乾", kind="animal_sitcom", outline="  大綱內容\n")
+    assert (
+        seen == {"outline": "大綱內容", "strict": False} and job.meta["outline"] == "大綱內容"
+    )  # 去頭尾空白；原文留作來源證據
+    assert "outline_strict" not in job.meta
+    job = pipeline.new_job("餅乾", kind="animal_sitcom", outline="完整劇情", strict=True)
+    assert seen["strict"] is True and job.meta["outline_strict"] is True
+
+
+def test_new_job_without_outline_leaves_meta_and_the_script_call_unchanged(work, monkeypatch):
+    script = content.SPECS["kids_english_dialogue"].schema.model_validate(english())
+    monkeypatch.setattr(content, "make_script", lambda kind, topic: content.to_plan(script, topic))
+    assert "outline" not in pipeline.new_job("想吃什麼", kind="kids_english_dialogue").meta
+
+
+@pytest.mark.parametrize("kind", ["kids", "trivia"])
+def test_outline_is_only_for_dialogue_kinds(work, kind):
+    with pytest.raises(ValueError, match="對白類"):
+        pipeline.new_job("x", kind=kind, outline="大綱")
+
+
+def _cli(monkeypatch, tmp_path, argv, *, existing=False):
+    """把 CLI 的 new_job／run 換成記錄器，回傳呼叫紀錄。"""
+    from videomaker import __main__ as cli
+
+    calls = []
+    job = SimpleNamespace(dir=tmp_path)
+    monkeypatch.setattr(cli.pipeline, "new_job", lambda *a, **k: calls.append(("new_job", a, k)) or job)
+    monkeypatch.setattr(cli.pipeline, "run", lambda *a, **k: calls.append(("run", a, k)) or job)
+    monkeypatch.setattr(cli.pipeline, "find_job", lambda *a: job if existing else None)
+    monkeypatch.setattr(cli.renderers, "require", lambda name: calls.append(("require", name)))
+    cli.main(argv)
+    return calls
+
+
+def test_cli_outline_creates_the_job_then_resumes_it_without_changing_run_signature(tmp_path, monkeypatch):
+    f = tmp_path / "outline.md"
+    f.write_text("  Meatball 偷餅乾。\n", encoding="utf-8")
+    calls = _cli(monkeypatch, tmp_path, ["make", "餅乾", "--kind", "animal_sitcom", "--outline", str(f)])
+    assert [c[0] for c in calls] == ["require", "new_job", "run"]  # 先擋 renderer，才花 LLM 時間
+    assert calls[1][2]["outline"] == "Meatball 偷餅乾。"
+    assert calls[2][1][3] is True  # run(resume=True) 接手剛建立的作業
+
+
+def test_cli_outline_dry_run_skips_the_renderer_check(tmp_path, monkeypatch):
+    f = tmp_path / "outline.md"
+    f.write_text("大綱", encoding="utf-8")
+    argv = ["make", "餅乾", "--kind", "animal_sitcom", "--outline", str(f), "--dry-run"]
+    assert [c[0] for c in _cli(monkeypatch, tmp_path, argv)] == ["new_job", "run"]
+
+
+@pytest.mark.parametrize("extra", [["--resume"], []])
+def test_cli_outline_refuses_resume_and_empty_files(tmp_path, monkeypatch, extra):
+    f = tmp_path / "outline.md"
+    f.write_text("" if not extra else "大綱", encoding="utf-8")
+    argv = ["make", "餅乾", "--kind", "animal_sitcom", "--outline", str(f), *extra]
+    with pytest.raises(SystemExit):
+        _cli(monkeypatch, tmp_path, argv)
+
+
+def test_cli_story_is_the_strict_variant_and_excludes_outline(tmp_path, monkeypatch):
+    f = tmp_path / "story.md"
+    f.write_text("完整劇情", encoding="utf-8")
+    calls = _cli(monkeypatch, tmp_path, ["make", "餅乾", "--kind", "animal_sitcom", "--story", str(f)])
+    assert calls[1][2] == {"outline": "完整劇情", "strict": True}
+    argv = ["make", "餅乾", "--kind", "animal_sitcom", "--story", str(f), "--outline", str(f)]
+    with pytest.raises(SystemExit):
+        _cli(monkeypatch, tmp_path, argv)
+
+
+def test_cli_without_outline_still_calls_run_exactly_as_before(tmp_path, monkeypatch):
+    calls = _cli(monkeypatch, tmp_path, ["make", "餅乾", "--kind", "animal_sitcom", "--dry-run"])
+    assert [c[0] for c in calls] == ["run"]
+
+
 def test_silence_inside_a_shot_without_dialogue_is_allowed_but_not_inside_a_speaking_shot(work, monkeypatch):
     job = make_job(work, "animal_sitcom")
     job.plan.script["shots"][1]["dialogue"] = []  # 第 2 鏡是反應鏡頭，沒有話
