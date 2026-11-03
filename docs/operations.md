@@ -442,6 +442,8 @@ videoMaker make "<主題>" --kind animal_sitcom --stage clips
 
 ### 自己的劇情大綱
 
+在 Claude Code 裡可用 `/story-video <大綱或劇情>`（`.claude/skills/story-video`）：它會檢查夜間時段、把稿子送到 GX10、先 `--dry-run` 給你看腳本，確認後才開跑；不核准、不上傳。以下是手動做法。
+
 ```bash
 # 大綱檔（繁體中文，UTF-8）：寫角色、事件順序、結局或反轉即可，不必寫分鏡與英文對白
 videoMaker make "餅乾風波" --kind animal_sitcom --outline outline.md --dry-run   # 先看 plan.json
