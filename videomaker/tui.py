@@ -127,6 +127,7 @@ class VM(App):
 
     def __init__(self) -> None:
         super().__init__()
+        self.theme = "ansi-light"  # 不畫 truecolor 底色，淺色／深色都跟著終端機（herdr）主題走
         self.data: list[dict] = []
         self.viewed: dict[str, str] = {}  # 核准只能使用這次開啟播放的版本，不能拿 GX10 的新成片冒充
         self.selected: set[str] = set()  # 勾選的作業名稱；目前只給批次刪除（g／m）使用

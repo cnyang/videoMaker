@@ -796,3 +796,17 @@ def test_tui_failed_task_keeps_full_error_in_a_dialog_until_dismissed(monkeypatc
     )
     assert "仍在處理" in seen["text"] and "失敗" in seen["text"]  # 訊息不會 10 秒後消失
     assert seen["after"] != "Detail"  # Esc 關得掉
+
+
+def test_app_follows_terminal_background(monkeypatch):
+    """淺色或深色終端機都要沿用終端機自己的底色，不能畫上 Textual 預設的黑底。"""
+    env = Env(monkeypatch, [_row("20260101_a"), _row("20260102_b")])
+    seen = {}
+
+    def check(app):
+        strips = app.screen._compositor.render_strips()
+        colors = {seg.style.bgcolor for strip in strips for seg in strip if seg.style and seg.style.bgcolor}
+        seen.update(ansi=app.native_ansi_color, truecolor=[c for c in colors if c.triplet])
+
+    drive(env, check)
+    assert seen == {"ansi": True, "truecolor": []}
